@@ -1,0 +1,17 @@
+[package]
+name = "geokit-env"
+version = "0.1.0"
+description = "The Environment manager and the GPU Lease an app's desktop core shares: the Pythons it may start, the steps that install its own, and the one right to the GPU"
+authors = ["RockAnalytica"]
+license = "Apache-2.0"
+repository = "https://github.com/rockanalytica/geokit"
+edition = "2021"
+rust-version = "1.80"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

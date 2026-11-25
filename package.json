@@ -1,0 +1,25 @@
+{
+  "name": "geokit",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "domain-gate": "node --test tools/domain-gate/check.test.mjs && node tools/domain-gate/check.mjs",
+    "licence-gate": "node tools/licence-gate/check.mjs && node tools/licence-gate/check_cargo.mjs && node --test tools/licence-gate/check.test.mjs",
+    "notices": "node tools/licence-gate/notices.mjs",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm domain-gate && pnpm licence-gate"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "packageManager": "pnpm@12.4.2"
+}

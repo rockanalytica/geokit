@@ -1,0 +1,6 @@
+packages:
+  - packages/*
+
+# pnpm 12 runs no dependency build scripts unless listed here. Review each.
+allowBuilds:
+  esbuild: true # postinstall only checks the platform binary is present

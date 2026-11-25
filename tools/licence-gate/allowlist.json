@@ -1,0 +1,19 @@
+{
+  "_comment": "Permissive-only, per LICENSES.md. SPDX identifiers as reported by package metadata. Anything else fails until pinned in exceptions.json.",
+  "spdx": [
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "Apache-2.0",
+    "ISC",
+    "PostgreSQL",
+    "Unlicense",
+    "CC0-1.0",
+    "Python-2.0",
+    "OFL-1.1",
+    "BlueOak-1.0.0",
+    "Zlib"
+  ]
+}

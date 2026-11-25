@@ -1,0 +1,159 @@
+/* geokit design tokens — the one theme file the apps share.
+   Theme follows the OS; `data-theme="light|dark"` on <html> overrides it.
+   Every colour a component uses is named here or in the app's own tokens,
+   never inlined.
+
+   Brand slots: an app sets the `--gk-brand-*` values in its own stylesheet,
+   after importing this one; the accent, focus and chrome follow from them.
+   The defaults are a neutral indigo, so an app that sets nothing still
+   reads. Tokens that mean something only in one app (its print colours, its
+   own semantic hues) live in that app, not here. */
+
+@import "@fontsource-variable/inter";
+
+/* ---- Brand slots (fixed, theme-independent) ------------------------------ */
+:root {
+  /* the darkest brand colour: the dark theme's ground, the light theme's text */
+  --gk-brand-ink: #14142b;
+  /* the interactive accent, as it reads on the dark ground */
+  --gk-brand-primary: #5d69ff;
+  /* the accent a step lighter, for hover on the dark ground */
+  --gk-brand-primary-hover: #7580ff;
+  /* the accent a step deeper, as it reads on the light ground */
+  --gk-brand-primary-deep: #4550e6;
+  /* a second and third brand hue, and a pale tint, for an app's own marks */
+  --gk-brand-secondary: #80c6ff;
+  --gk-brand-tertiary: #ba8eff;
+  --gk-brand-pale: #e4d4ff;
+}
+
+/* ---- Dark theme (default) ----------------------------------------------- */
+:root {
+  color-scheme: dark;
+
+  /* chrome: ink-tinted neutrals, darkest to lightest */
+  --gk-surface-0: var(--gk-brand-ink);
+  --gk-surface-1: #1b1b36;
+  --gk-surface-2: #22223f;
+  --gk-surface-3: #2a2a4a;
+  --gk-border: #34345a;
+  --gk-border-strong: #45456e;
+
+  --gk-fg: #eef0f6;
+  --gk-fg-muted: #9aa0b6;
+  /* a kind's mark: between the muted text and the text */
+  --gk-fg-icon: #c4c8d6;
+  --gk-fg-faint: #6b6f86;
+
+  /* interactive accent: the primary brand hue alone */
+  --gk-accent: var(--gk-brand-primary);
+  --gk-accent-hover: var(--gk-brand-primary-hover);
+  --gk-accent-fg: #ffffff;
+  --gk-focus: var(--gk-brand-secondary);
+
+  /* state: never brand hues, so they read as what they are */
+  --gk-selection: #80c6ff;
+  --gk-danger: #e05a52;
+  --gk-ok: #4cbf74;
+
+  /* the 3D viewport is neutral: colormaps must not sit on a tinted field */
+  --gk-viewport: #1f1f23;
+  --gk-viewport-alt: #ffffff;
+}
+
+/* ---- Light theme -------------------------------------------------------- */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --gk-surface-0: #eef0f6;
+    --gk-surface-1: #ffffff;
+    --gk-surface-2: #e7e9f2;
+    --gk-surface-3: #dcdfea;
+    --gk-border: #c9cce0;
+    --gk-border-strong: #9aa0b6;
+    --gk-fg: var(--gk-brand-ink);
+    --gk-fg-muted: #4a4f66;
+    --gk-fg-icon: #2f3248;
+    --gk-fg-faint: #8288a0;
+    --gk-accent: var(--gk-brand-primary-deep);
+    --gk-accent-hover: var(--gk-brand-primary);
+    --gk-accent-fg: #ffffff;
+    --gk-focus: var(--gk-brand-primary-deep);
+    --gk-selection: #2f9be6;
+    --gk-danger: #b3352f;
+    --gk-ok: #1f7a3d;
+    --gk-viewport: #f2f2f4;
+    --gk-viewport-alt: #ffffff;
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --gk-surface-0: #eef0f6;
+  --gk-surface-1: #ffffff;
+  --gk-surface-2: #e7e9f2;
+  --gk-surface-3: #dcdfea;
+  --gk-border: #c9cce0;
+  --gk-border-strong: #9aa0b6;
+  --gk-fg: var(--gk-brand-ink);
+  --gk-fg-muted: #4a4f66;
+  --gk-fg-icon: #2f3248;
+  --gk-fg-faint: #8288a0;
+  --gk-accent: var(--gk-brand-primary-deep);
+  --gk-accent-hover: var(--gk-brand-primary);
+  --gk-accent-fg: #ffffff;
+  --gk-focus: var(--gk-brand-primary-deep);
+  --gk-selection: #2f9be6;
+  --gk-danger: #b3352f;
+  --gk-ok: #1f7a3d;
+  --gk-viewport: #f2f2f4;
+  --gk-viewport-alt: #ffffff;
+}
+
+/* ---- Tailwind theme (utilities: bg-surface-1, text-fg-muted, …) ---------- */
+@theme inline {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+
+  --color-brand-ink: var(--gk-brand-ink);
+  --color-brand-primary: var(--gk-brand-primary);
+  --color-brand-secondary: var(--gk-brand-secondary);
+  --color-brand-tertiary: var(--gk-brand-tertiary);
+  --color-brand-pale: var(--gk-brand-pale);
+
+  --color-surface-0: var(--gk-surface-0);
+  --color-surface-1: var(--gk-surface-1);
+  --color-surface-2: var(--gk-surface-2);
+  --color-surface-3: var(--gk-surface-3);
+  --color-border: var(--gk-border);
+  --color-border-strong: var(--gk-border-strong);
+  --color-fg: var(--gk-fg);
+  --color-fg-muted: var(--gk-fg-muted);
+  --color-fg-icon: var(--gk-fg-icon);
+  --color-fg-faint: var(--gk-fg-faint);
+  --color-accent: var(--gk-accent);
+  --color-accent-hover: var(--gk-accent-hover);
+  --color-accent-fg: var(--gk-accent-fg);
+  --color-focus: var(--gk-focus);
+  --color-selection: var(--gk-selection);
+  --color-danger: var(--gk-danger);
+  --color-ok: var(--gk-ok);
+  --color-viewport: var(--gk-viewport);
+  --color-viewport-alt: var(--gk-viewport-alt);
+
+  /* density: compact */
+  --text-table: 13px;
+  --text-table--line-height: 1.35;
+  --text-ui: 14px;
+  --text-ui--line-height: 1.4;
+  --spacing-control: 2rem; /* 32 px controls */
+  --spacing-rail: 3rem;
+  --spacing-bar: 2.75rem;
+  --spacing-tabs: 2.25rem;
+  --spacing-dock: 18rem;
+  --spacing-dock-wide: 20rem;
+  --spacing-drawer: 12rem;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+}

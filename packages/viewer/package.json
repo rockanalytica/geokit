@@ -1,0 +1,29 @@
+{
+  "name": "@geokit/viewer",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./value": "./src/layers/value.ts",
+    "./picking": "./src/picking.ts",
+    "./section": "./src/section.ts"
+  },
+  "files": [
+    "src",
+    "!src/**/*.test.ts"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "three": "^0.186.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/three": "^0.186.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

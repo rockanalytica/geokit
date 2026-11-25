@@ -1,0 +1,5 @@
+{
+  "_comment": "Reviewed exceptions, pinned by exact name@version ('*' wildcards the name). Each needs a reason, and the user's yes. Re-review on upgrade: a bumped version fails the gate again by design.",
+  "npm": {},
+  "cargo": {}
+}
