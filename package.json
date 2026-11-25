@@ -13,7 +13,6 @@
     "format": "biome format --write .",
     "domain-gate": "node --test tools/domain-gate/check.test.mjs && node tools/domain-gate/check.mjs",
     "licence-gate": "node tools/licence-gate/check.mjs && node tools/licence-gate/check_cargo.mjs && node --test tools/licence-gate/check.test.mjs",
-    "notices": "node tools/licence-gate/notices.mjs",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm domain-gate && pnpm licence-gate"
   },
   "devDependencies": {

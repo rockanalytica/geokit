@@ -1,15 +1,27 @@
 // What an app's core starts, each as a program and its arguments, built
-// here rather than by the page: a Python in an Environment, the steps that
-// install the app's own Environment, and the questions put to WSL. The page
-// names an Environment, a distribution; what is started from them is fixed
-// here, every value checked first and passed as one argument, never as code.
-// What the app installs is its own `Recipe`; nothing here names a package.
+// here rather than by the page: a Python in an Environment and the questions
+// put to WSL. (The steps that install the app's own Environment are in
+// `install.rs`.) The page names an Environment, a distribution; what is
+// started from them is fixed here, every value checked first and passed as
+// one argument, never as code. What the app installs is its own `Recipe`;
+// nothing here names a package.
 
 use crate::envs::{word, Environment, Machine, Python};
+use crate::problem::Problem;
 use std::collections::HashMap;
 
 /// The Python an Environment is made with when a Recipe names no other.
 pub const DEFAULT_PYTHON: &str = "3.12";
+
+/// What runs on the Linux side of a program that is started in WSL: the
+/// distribution (WSL's default where empty) and the bash script. A Spawner
+/// that can end the Linux side with the program uses it; the program's own
+/// `program` and `args` are the plain command line that runs the same.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Linux {
+    pub distro: String,
+    pub script: String,
+}
 
 /// A program to start: what, with which arguments, and with what added to its environment.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +29,8 @@ pub struct Program {
     pub program: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+    /// Set for a program that runs in WSL.
+    pub linux: Option<Linux>,
 }
 
 /// `p` with `args`, nothing added to its environment.
@@ -25,6 +39,7 @@ pub fn program(p: &str, args: &[&str]) -> Program {
         program: p.into(),
         args: args.iter().map(|a| a.to_string()).collect(),
         env: HashMap::new(),
+        linux: None,
     }
 }
 
@@ -45,9 +60,9 @@ pub struct Shipped {
 /// What an app installs in an Environment of its own.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recipe {
-    /// The Environment's folder, in the app's data folder (a word).
+    /// The Environment's folder, in the app's data folder (a word, not starting with a dot).
     pub name: String,
-    /// The app's own folder in WSL, under `~/.local/share` (a word).
+    /// The app's own folder in WSL, under `~/.local/share` (a word, not starting with a dot).
     pub app: String,
     /// The Python it is made with (`3.12`).
     pub python: String,
@@ -58,9 +73,30 @@ pub struct Recipe {
     pub packages: Vec<String>,
     /// Local wheels installed last, over what is there, without their dependencies.
     pub wheels: Vec<String>,
-    /// Python code run last: it prints what it found and exits non-zero when
-    /// the Environment is not what the app needs.
+    /// Python code run last: it prints what it found (its last line is the
+    /// version the app records) and exits non-zero when the Environment is
+    /// not what the app needs.
     pub check: String,
+}
+
+/// The kind of system a program is built for, which says where the app's own
+/// Environment can be: the plans are built for either, on any host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Windows,
+    /// macOS or Linux.
+    Posix,
+}
+
+impl Os {
+    /// The system this is running on.
+    pub fn this() -> Os {
+        if cfg!(windows) {
+            Os::Windows
+        } else {
+            Os::Posix
+        }
+    }
 }
 
 /// Where the app installs an Environment of its own.
@@ -76,17 +112,26 @@ pub enum Own {
 }
 
 impl Own {
-    /// Whether this computer can have it: Windows and WSL on Windows, Posix elsewhere.
-    pub fn here(&self) -> Result<(), String> {
+    /// Whether a computer of kind `os` can have it: Windows and WSL on
+    /// Windows, Posix elsewhere.
+    pub fn supported_on(&self, os: Os) -> Result<(), Problem> {
         let ok = match self {
-            Own::Windows | Own::Wsl { .. } => cfg!(windows),
-            Own::Posix => !cfg!(windows),
+            Own::Windows | Own::Wsl { .. } => os == Os::Windows,
+            Own::Posix => os == Os::Posix,
         };
         if ok {
             Ok(())
         } else {
-            Err("refused install: not on this computer's system".into())
+            Err(Problem::new(
+                "install.not_here",
+                "That Environment cannot be made on this computer's system.",
+            ))
         }
+    }
+
+    /// Whether this computer can have it.
+    pub fn here(&self) -> Result<(), Problem> {
+        self.supported_on(Os::this())
     }
 
     /// Whether it lives in the app's own data folder, rather than in WSL.
@@ -108,21 +153,51 @@ pub fn sh_path(p: &str) -> String {
     }
 }
 
-/// A Windows path as WSL sees it: a drive under /mnt, a WSL folder as its own.
-pub fn wsl_path(windows: &str) -> Result<String, String> {
+/// The app's own folder in WSL, `home` being `~` or `$HOME`: the one place
+/// that names `.local/share`.
+pub fn wsl_share(app: &str, home: &str) -> String {
+    format!("{home}/.local/share/{app}")
+}
+
+/// Where uv keeps its downloads for the app in WSL.
+pub fn wsl_cache(app: &str, home: &str) -> String {
+    format!("{home}/.cache/{app}/uv")
+}
+
+/// A Windows path as WSL sees it in `distro` (WSL's default where empty): a
+/// drive under /mnt, a folder of that same distribution as its own path. A
+/// folder of another distribution, or a path relative to a drive (`C:foo`),
+/// is not one WSL can be given.
+pub fn wsl_path(windows: &str, distro: &str) -> Result<String, Problem> {
+    let no = |code: &str, english: &str| Problem::new(code, english).with("path", windows);
     let lower = windows.to_ascii_lowercase();
     for pre in [r"\\wsl.localhost\", r"\\wsl$\"] {
         if lower.starts_with(pre) {
             let rest = &windows[pre.len()..];
-            let own = rest.find('\\').map(|i| &rest[i..]).unwrap_or(r"\");
+            let (name, own) = match rest.find('\\') {
+                Some(i) => (&rest[..i], &rest[i..]),
+                None => (rest, r"\"),
+            };
+            if !distro.is_empty() && !name.eq_ignore_ascii_case(distro) {
+                return Err(no(
+                    "wsl.other_distro",
+                    "That path is in another WSL distribution.",
+                )
+                .with("distro", name));
+            }
             return Ok(own.replace('\\', "/"));
         }
     }
     let b = windows.as_bytes();
     if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
-        let rest = windows[2..]
-            .trim_start_matches(['\\', '/'])
-            .replace('\\', "/");
+        let after = &windows[2..];
+        if !after.starts_with(['\\', '/']) {
+            return Err(no(
+                "wsl.drive_relative",
+                "That path is relative to a drive's current folder.",
+            ));
+        }
+        let rest = after.trim_start_matches(['\\', '/']).replace('\\', "/");
         let rest = rest.trim_end_matches('/');
         let drive = (b[0] as char).to_ascii_lowercase();
         return Ok(if rest.is_empty() {
@@ -131,15 +206,15 @@ pub fn wsl_path(windows: &str) -> Result<String, String> {
             format!("/mnt/{drive}/{rest}")
         });
     }
-    Err(format!("{windows} is not a path WSL can reach"))
+    Err(no("wsl.path", "That is not a path WSL can reach."))
 }
 
 /// A WSL distribution's name as `wsl.exe -d` takes it; empty is WSL's default.
-pub fn distro_ok(d: &str) -> Result<(), String> {
+pub fn distro_ok(d: &str) -> Result<(), Problem> {
     if word(d) {
         Ok(())
     } else {
-        Err(format!("{d:?} is not a WSL distribution's name"))
+        Err(Problem::new("wsl.distro", "That is not a WSL distribution's name.").with("distro", d))
     }
 }
 
@@ -150,53 +225,44 @@ pub fn wsl(distro: &str, script: &str) -> Program {
         args.extend(["-d", distro]);
     }
     args.extend(["--exec", "bash", "-lc", script]);
-    program("wsl.exe", &args)
+    Program {
+        linux: Some(Linux {
+            distro: distro.into(),
+            script: script.into(),
+        }),
+        ..program("wsl.exe", &args)
+    }
 }
 
 /// `env`'s Python started with `args` after the isolating flags, each one
 /// argument (quoted for the shell, in WSL). What the app's core starts its
 /// own Python side with.
-pub fn python(env: &Environment, args: &[&str]) -> Result<Program, String> {
+pub fn python(env: &Environment, args: &[&str]) -> Result<Program, Problem> {
     let env = env.trimmed();
     if let Some(why) = env.problem() {
-        return Err(format!("refused Environment: {why}"));
+        return Err(why);
     }
     let mut tail: Vec<String> = PY_FLAGS.iter().map(|s| s.to_string()).collect();
     tail.extend(args.iter().map(|a| a.to_string()));
     let mut p = match env.machine {
         Machine::Windows | Machine::Posix => {
-            let default = if env.machine == Machine::Windows {
-                "python"
-            } else {
-                "python3"
-            };
-            match &env.python {
+            let (exe, args) = match &env.python {
                 Python::Conda { name } => {
                     let mut a: Vec<String> = ["run", "-n", name, "--no-capture-output", "python"]
                         .iter()
                         .map(|s| s.to_string())
                         .collect();
                     a.extend(tail);
-                    Program {
-                        program: if env.machine == Machine::Windows {
-                            "conda.exe".into()
-                        } else {
-                            "conda".into()
-                        },
-                        args: a,
-                        env: HashMap::new(),
-                    }
+                    (env.machine.conda().to_string(), a)
                 }
-                Python::Path { path } => Program {
-                    program: path.clone(),
-                    args: tail,
-                    env: HashMap::new(),
-                },
-                Python::Default => Program {
-                    program: default.into(),
-                    args: tail,
-                    env: HashMap::new(),
-                },
+                Python::Path { path } => (path.clone(), tail),
+                Python::Default => (env.machine.default_python(), tail),
+            };
+            Program {
+                program: exe,
+                args,
+                env: HashMap::new(),
+                linux: None,
             }
         }
         Machine::Wsl => {
@@ -209,7 +275,7 @@ pub fn python(env: &Environment, args: &[&str]) -> Result<Program, String> {
                     sh(name)
                 ),
                 Python::Path { path } => format!("exec {} {rest}", sh_path(path)),
-                Python::Default => format!("exec python{DEFAULT_PYTHON} {rest}"),
+                Python::Default => format!("exec {} {rest}", env.machine.default_python()),
             };
             wsl(&env.distro, &script)
         }
@@ -219,28 +285,37 @@ pub fn python(env: &Environment, args: &[&str]) -> Result<Program, String> {
 }
 
 /// A version as `uv python install` and a Recipe take it: digits and dots.
-fn version_ok(v: &str) -> Result<(), String> {
+fn version_ok(v: &str) -> Result<(), Problem> {
     let ok = !v.is_empty()
         && v.split('.')
             .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
     if ok {
         Ok(())
     } else {
-        Err(format!("{v} is not a Python version"))
+        Err(Problem::new("recipe.python", "That is not a Python version.").with("python", v))
     }
+}
+
+/// A folder's name: a word that is not `.` or `..` or hidden, so a folder
+/// named by it can be removed without removing anything else.
+fn folder_ok(s: &str) -> bool {
+    !s.is_empty() && word(s) && !s.starts_with('.')
 }
 
 impl Recipe {
     /// Why it cannot be installed, or None: every value it puts on a command line checked.
-    pub fn problem(&self) -> Option<String> {
-        if self.name.is_empty() || !word(&self.name) {
-            return Some(format!(
-                "{:?} is not an Environment's folder name",
-                self.name
-            ));
+    pub fn problem(&self) -> Option<Problem> {
+        let bad =
+            |code: &str, english: &str, v: &str| Some(Problem::new(code, english).with("value", v));
+        if !folder_ok(&self.name) {
+            return bad(
+                "recipe.name",
+                "That is not an Environment's folder name.",
+                &self.name,
+            );
         }
-        if self.app.is_empty() || !word(&self.app) {
-            return Some(format!("{:?} is not an app's folder name", self.app));
+        if !folder_ok(&self.app) {
+            return bad("recipe.app", "That is not an app's folder name.", &self.app);
         }
         if let Err(e) = version_ok(&self.python) {
             return Some(e);
@@ -252,14 +327,14 @@ impl Recipe {
             .chain(self.lockfile.iter());
         for v in values {
             if v.trim().is_empty() || v.starts_with('-') {
-                return Some(format!("{v:?} is not a requirement or a file"));
+                return bad("recipe.value", "That is not a requirement or a file.", v);
             }
             if v.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}') {
-                return Some(format!("{v:?} holds a control character"));
+                return bad("recipe.control", "That holds a control character.", v);
             }
         }
         if self.check.trim().is_empty() {
-            return Some("a Recipe needs a check".into());
+            return Some(Problem::new("recipe.check", "A Recipe needs a check."));
         }
         None
     }
@@ -269,7 +344,7 @@ impl Recipe {
 pub fn own_folder(own: &Own, data: &str, r: &Recipe) -> String {
     match own {
         Own::Windows => format!(r"{data}\environments\{}", r.name),
-        Own::Wsl { .. } => format!("~/.local/share/{}/{}", r.app, r.name),
+        Own::Wsl { .. } => format!("{}/{}", wsl_share(&r.app, "~"), r.name),
         Own::Posix => format!("{data}/environments/{}", r.name),
     }
 }
@@ -302,172 +377,8 @@ pub fn own_environment(own: &Own, data: &str, r: &Recipe) -> Environment {
     }
 }
 
-/// The steps that install the app's own Environment, in order. On Windows,
-/// macOS and Linux uv makes it all — its own Python in the app's data
-/// folder, a venv, the lockfile, the packages, the wheels — then the check
-/// runs. In WSL it is one script: with uv for Linux shipped, the same steps
-/// with no root or apt; without it, the distribution's own Python makes a
-/// venv and pip fills it. Run on one made before, they upgrade it in place;
-/// `fresh`, the WSL one is made again from nothing (on Windows the caller
-/// removes the folder).
-pub fn install_steps(
-    own: &Own,
-    s: &Shipped,
-    r: &Recipe,
-    fresh: bool,
-) -> Result<Vec<Program>, String> {
-    if let Some(why) = r.problem() {
-        return Err(format!("refused Recipe: {why}"));
-    }
-    own.here()?;
-    let dir = own_folder(own, &s.data, r);
-    let v = r.python.as_str();
-    match own {
-        Own::Windows | Own::Posix => {
-            let win = *own == Own::Windows;
-            let at = |name: &str| {
-                if win {
-                    format!(r"{}\{name}", s.data)
-                } else {
-                    format!("{}/{name}", s.data)
-                }
-            };
-            let mut env = HashMap::new();
-            env.insert("UV_PYTHON_INSTALL_DIR".to_string(), at("python"));
-            env.insert("UV_CACHE_DIR".to_string(), at("cache"));
-            // the user's own uv settings have no say in what the app makes
-            env.insert("UV_NO_CONFIG".to_string(), "1".into());
-            env.insert("PYTHONIOENCODING".to_string(), "utf-8".into());
-            let python = match own_environment(own, &s.data, r).python {
-                Python::Path { path } => path,
-                _ => unreachable!("the app's own is a Python by path"),
-            };
-            let uv = |args: &[&str]| Program {
-                env: env.clone(),
-                ..program(&s.uv, args)
-            };
-            // the app's own Python: put on no PATH, registered nowhere in Windows
-            let mut python_install = vec!["python", "install", v, "--no-bin"];
-            if win {
-                python_install.push("--no-registry");
-            }
-            let mut steps = vec![
-                uv(&python_install),
-                uv(&[
-                    "venv",
-                    &dir,
-                    "--python",
-                    v,
-                    "--python-preference",
-                    "only-managed",
-                    "--allow-existing",
-                ]),
-            ];
-            if let Some(lock) = &r.lockfile {
-                steps.push(uv(&["pip", "sync", "--python", &python, lock]));
-            }
-            if !r.packages.is_empty() {
-                let mut a = vec!["pip", "install", "--python", &python];
-                a.extend(r.packages.iter().map(String::as_str));
-                steps.push(uv(&a));
-            }
-            if !r.wheels.is_empty() {
-                let mut a = vec![
-                    "pip",
-                    "install",
-                    "--python",
-                    &python,
-                    "--reinstall",
-                    "--no-deps",
-                ];
-                a.extend(r.wheels.iter().map(String::as_str));
-                steps.push(uv(&a));
-            }
-            let mut check = program(
-                &python,
-                &[PY_FLAGS[0], PY_FLAGS[1], PY_FLAGS[2], "-c", &r.check],
-            );
-            check.env.insert("PYTHONIOENCODING".into(), "utf-8".into());
-            steps.push(check);
-            Ok(steps)
-        }
-        Own::Wsl { distro } => {
-            distro_ok(distro)?;
-            let lock = r.lockfile.as_deref().map(wsl_path).transpose()?;
-            let wheels = r
-                .wheels
-                .iter()
-                .map(|w| wsl_path(w).map(|p| sh(&p)))
-                .collect::<Result<Vec<_>, _>>()?
-                .join(" ");
-            let packages = r
-                .packages
-                .iter()
-                .map(|p| sh(p))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let py = "\"$D/bin/python\"";
-            let mut script = vec![
-                "set -u".to_string(),
-                r#"fail() { echo "$1" >&2; exit 1; }"#.to_string(),
-                format!(r#"D="$HOME/.local/share/{}/{}""#, r.app, r.name),
-                if fresh {
-                    r#"rm -rf "$D""#.to_string()
-                } else {
-                    ":".to_string()
-                },
-            ];
-            match &s.uv_linux {
-                Some(uv) => {
-                    script.extend([
-                        format!(r#"UV={}"#, sh(&wsl_path(uv)?)),
-                        format!(r#"export UV_PYTHON_INSTALL_DIR="$HOME/.local/share/{}/python""#, r.app),
-                        format!(r#"export UV_CACHE_DIR="$HOME/.cache/{}/uv""#, r.app),
-                        "export UV_NO_CONFIG=1".to_string(),
-                        format!(r#""$UV" python install {v} --no-bin || fail "Python {v} could not be installed.""#),
-                        format!(r#""$UV" venv "$D" --python {v} --python-preference only-managed --allow-existing || fail "The venv could not be made.""#),
-                    ]);
-                    if let Some(lock) = &lock {
-                        script.push(format!(r#""$UV" pip sync --python {py} {} || fail "The locked packages could not be installed.""#, sh(lock)));
-                    }
-                    if !packages.is_empty() {
-                        script.push(format!(r#""$UV" pip install --python {py} {packages} || fail "The packages could not be installed.""#));
-                    }
-                    if !wheels.is_empty() {
-                        script.push(format!(r#""$UV" pip install --python {py} --reinstall --no-deps {wheels} || fail "The app's own wheels could not be installed.""#));
-                    }
-                }
-                None => {
-                    script.extend([
-                        format!(r#"PY="$(command -v python{v} || true)""#),
-                        format!(r#"[ -n "$PY" ] || fail "No Python {v} in this distribution. On Ubuntu: sudo apt install python{v} python{v}-venv""#),
-                        // made before, it is kept; half made by a run that stopped, it is made again
-                        format!(r#""$D/bin/python" -m pip --version >/dev/null 2>&1 || {{ rm -rf "$D"; mkdir -p "$(dirname "$D")"; "$PY" -m venv "$D"; }} || fail "The venv could not be made. On Ubuntu: sudo apt install python{v}-venv""#),
-                        format!(r#"{py} -m pip install --upgrade pip || fail "pip could not be updated.""#),
-                    ]);
-                    if let Some(lock) = &lock {
-                        script.push(format!(r#"{py} -m pip install -r {} || fail "The locked packages could not be installed.""#, sh(lock)));
-                    }
-                    if !packages.is_empty() {
-                        script.push(format!(r#"{py} -m pip install {packages} || fail "The packages could not be installed.""#));
-                    }
-                    if !wheels.is_empty() {
-                        script.push(format!(r#"{py} -m pip install --force-reinstall --no-deps {wheels} || fail "The app's own wheels could not be installed.""#));
-                    }
-                }
-            }
-            script.push(format!(
-                r#"{py} -I -X utf8 -c {} || fail "The Environment is not what the app needs.""#,
-                sh(&r.check)
-            ));
-            let mut p = wsl(distro, &script.join("\n"));
-            p.env.insert("PYTHONIOENCODING".into(), "utf-8".into());
-            Ok(vec![p])
-        }
-    }
-}
-
 /// The distributions WSL has, one per line, in UTF-8 rather than its UTF-16.
+/// What it prints is read with `detect::wsl_distros`.
 pub fn wsl_list() -> Program {
     let mut p = program("wsl.exe", &["--list", "--quiet"]);
     p.env.insert("WSL_UTF8".into(), "1".into());
@@ -479,12 +390,9 @@ pub fn wsl_list() -> Program {
 pub const GPU_PROBE: &str = r#"command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | head -n 1 | sed "s/^/GPU\t/"
 true"#;
 
-/// The GPU probe run in `distro`.
-pub fn wsl_gpu_probe(distro: &str) -> Result<Program, String> {
+/// The GPU probe run in `distro` (WSL's default where it is empty).
+pub fn wsl_gpu_probe(distro: &str) -> Result<Program, Problem> {
     distro_ok(distro)?;
-    if distro.is_empty() {
-        return Err("no distribution named".into());
-    }
     Ok(wsl(distro, GPU_PROBE))
 }
 
@@ -498,18 +406,10 @@ pub fn gpu_found(lines: &[String]) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn shipped() -> Shipped {
-        Shipped {
-            data: r"C:\Users\Ítalo\AppData\Local\com.example.app".into(),
-            uv: r"C:\Program Files\App\uv\uv.exe".into(),
-            uv_linux: None,
-        }
-    }
-
-    fn recipe() -> Recipe {
+    pub(crate) fn recipe() -> Recipe {
         Recipe {
             name: "engine".into(),
             app: "example-app".into(),
@@ -523,16 +423,34 @@ mod tests {
 
     #[test]
     fn a_windows_path_as_wsl_sees_it() {
+        let w = |p: &str| wsl_path(p, "Ubuntu");
+        assert_eq!(w(r"C:\Users\Ítalo\P").unwrap(), "/mnt/c/Users/Ítalo/P");
+        assert_eq!(w(r"D:\").unwrap(), "/mnt/d");
+        assert_eq!(w("d:/x/y/").unwrap(), "/mnt/d/x/y");
         assert_eq!(
-            wsl_path(r"C:\Users\Ítalo\P").unwrap(),
-            "/mnt/c/Users/Ítalo/P"
-        );
-        assert_eq!(wsl_path(r"D:\").unwrap(), "/mnt/d");
-        assert_eq!(
-            wsl_path(r"\\wsl.localhost\Ubuntu\home\me\p").unwrap(),
+            w(r"\\wsl.localhost\Ubuntu\home\me\p").unwrap(),
             "/home/me/p"
         );
-        assert!(wsl_path("relative").is_err());
+        assert_eq!(w(r"\\WSL$\ubuntu\home").unwrap(), "/home");
+        assert_eq!(w(r"\\wsl.localhost\Ubuntu").unwrap(), "/");
+        // WSL's default distribution: whichever one the path names is taken
+        assert_eq!(wsl_path(r"\\wsl.localhost\Debian\etc", "").unwrap(), "/etc");
+        assert_eq!(w("relative").unwrap_err().code, "wsl.path");
+        assert_eq!(w(r"\\server\share\x").unwrap_err().code, "wsl.path");
+    }
+
+    #[test]
+    fn a_path_in_another_distribution_or_relative_to_a_drive_is_refused() {
+        let e = wsl_path(r"\\wsl.localhost\Debian\home\me", "Ubuntu").unwrap_err();
+        assert_eq!(e.code, "wsl.other_distro");
+        assert_eq!(
+            wsl_path("C:foo", "Ubuntu").unwrap_err().code,
+            "wsl.drive_relative"
+        );
+        assert_eq!(
+            wsl_path("C:", "Ubuntu").unwrap_err().code,
+            "wsl.drive_relative"
+        );
     }
 
     #[test]
@@ -552,7 +470,7 @@ mod tests {
             },
         };
         // a character cmd reads as its own is refused, though no shell is used
-        assert!(python(&env, &["-m", "app"]).is_err());
+        assert_eq!(python(&env, &["-m", "app"]).unwrap_err().code, "env.cmd");
         let env = Environment {
             python: Python::Path {
                 path: r"C:\py\python.exe".into(),
@@ -563,6 +481,7 @@ mod tests {
         assert_eq!(p.program, r"C:\py\python.exe");
         assert_eq!(p.args, ["-I", "-X", "utf8", "-m", "app.engine", r"C:\My P"]);
         assert_eq!(p.env["PYTHONIOENCODING"], "utf-8");
+        assert_eq!(p.linux, None);
     }
 
     #[test]
@@ -581,14 +500,25 @@ mod tests {
             p.args[5],
             r#"exec "$HOME"'/.venvs/a'\''b/bin/python' '-I' '-X' 'utf8' '-m' 'app' '/mnt/c/it'\''s'"#
         );
+        // what runs on the Linux side is kept apart for a Spawner that can end it
+        let l = p.linux.clone().unwrap();
+        assert_eq!(
+            (l.distro.as_str(), l.script.as_str()),
+            ("Ubuntu", p.args[5].as_str())
+        );
         let conda = Environment {
             python: Python::Conda {
                 name: "tools".into(),
             },
-            ..env
+            ..env.clone()
         };
         assert!(python(&conda, &["-V"]).unwrap().args[5]
             .contains("conda activate 'tools' && exec python '-I'"));
+        let default = Environment {
+            python: Python::Default,
+            ..env
+        };
+        assert!(python(&default, &[]).unwrap().args[5].starts_with("exec python3.12 "));
     }
 
     #[test]
@@ -606,6 +536,11 @@ mod tests {
             &p.args[..6],
             ["run", "-n", "tools", "--no-capture-output", "python", "-I"]
         );
+        let posix = Environment {
+            machine: Machine::Posix,
+            ..env
+        };
+        assert_eq!(python(&posix, &[]).unwrap().program, "conda");
     }
 
     #[test]
@@ -619,167 +554,38 @@ mod tests {
         assert!(bad(|r| r.name = "a b".into()));
         assert!(bad(|r| r.name = String::new()));
         assert!(bad(|r| r.app = "../x".into()));
+        // a folder that is removed on a fresh install must be one folder
+        assert!(bad(|r| r.name = "..".into()));
+        assert!(bad(|r| r.app = ".".into()));
+        assert!(bad(|r| r.name = ".hidden".into()));
         assert!(bad(|r| r.python = "3.12; rm".into()));
         assert!(bad(|r| r.packages.push("--index-url=http://x".into())));
         assert!(bad(|r| r.wheels.push("a\nb".into())));
         assert!(bad(|r| r.lockfile = Some(" ".into())));
         assert!(bad(|r| r.check = String::new()));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_install_steps_on_windows() {
-        let r = recipe();
-        let steps = install_steps(&Own::Windows, &shipped(), &r, false).unwrap();
-        // python, venv, sync, packages, wheels, check
-        assert_eq!(steps.len(), 6);
-        assert!(steps[..5]
-            .iter()
-            .all(|s| s.program == shipped().uv && s.env["UV_NO_CONFIG"] == "1"));
-        assert_eq!(
-            steps[0].args,
-            ["python", "install", "3.12", "--no-bin", "--no-registry"]
-        );
-        let dir = r"C:\Users\Ítalo\AppData\Local\com.example.app\environments\engine";
-        assert_eq!(steps[1].args[1], dir);
-        let py = format!(r"{dir}\Scripts\python.exe");
-        assert_eq!(
-            steps[2].args,
-            [
-                "pip",
-                "sync",
-                "--python",
-                &py,
-                r"C:\Program Files\App\env\pylock.txt"
-            ]
-        );
-        assert_eq!(steps[3].args.last().unwrap(), "numpy>=2");
-        assert_eq!(&steps[4].args[4..6], ["--reinstall", "--no-deps"]);
-        assert_eq!(steps[5].program, py);
-        assert_eq!(steps[5].args.last().unwrap(), &r.check);
-        // only what a Recipe asks for
-        let bare = Recipe {
-            lockfile: None,
-            packages: vec![],
-            wheels: vec![],
-            ..r.clone()
-        };
-        assert_eq!(
-            install_steps(&Own::Windows, &shipped(), &bare, false)
-                .unwrap()
-                .len(),
-            3
-        );
-        let bad = Recipe {
-            python: "x".into(),
-            ..r
-        };
-        assert!(install_steps(&Own::Windows, &shipped(), &bad, false).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_install_steps_on_macos_and_linux() {
-        let s = Shipped {
-            data: "/home/u/.local/share/com.example.app".into(),
-            uv: "/opt/App/uv/uv".into(),
-            uv_linux: None,
-        };
-        let r = Recipe {
-            lockfile: Some("/opt/App/env/pylock.txt".into()),
-            wheels: vec!["/opt/App/wheels/app-1.0-py3-none-any.whl".into()],
-            ..recipe()
-        };
-        let steps = install_steps(&Own::Posix, &s, &r, false).unwrap();
-        assert_eq!(steps.len(), 6);
-        assert_eq!(steps[0].args, ["python", "install", "3.12", "--no-bin"]);
-        let dir = "/home/u/.local/share/com.example.app/environments/engine";
-        assert_eq!(steps[1].args[1], dir);
-        assert_eq!(
-            steps[0].env["UV_PYTHON_INSTALL_DIR"],
-            "/home/u/.local/share/com.example.app/python"
-        );
-        assert_eq!(steps[5].program, format!("{dir}/bin/python"));
-        assert_eq!(
-            own_environment(&Own::Posix, &s.data, &r).machine,
-            Machine::Posix
-        );
+        let mut r = recipe();
+        r.name = "a b".into();
+        assert_eq!(r.problem().unwrap().code, "recipe.name");
     }
 
     #[test]
     fn installs_only_what_this_computer_can_have() {
         assert_eq!(Own::Posix.here().is_ok(), !cfg!(windows));
         assert_eq!(Own::Windows.here().is_ok(), cfg!(windows));
-        assert!(Own::Posix.native() && Own::Windows.native());
-        assert!(!Own::Wsl { distro: "U".into() }.native());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_install_in_wsl_with_uv_needs_no_root() {
-        let own = Own::Wsl {
-            distro: "Ubuntu".into(),
-        };
-        let s = Shipped {
-            uv_linux: Some(r"C:\Program Files\App\uv\linux\uv".into()),
-            ..shipped()
-        };
-        let steps = install_steps(&own, &s, &recipe(), false).unwrap();
-        assert_eq!(steps.len(), 1);
-        assert_eq!(&steps[0].args[..2], ["-d", "Ubuntu"]);
-        let script = &steps[0].args[5];
-        assert!(script.contains(r#"D="$HOME/.local/share/example-app/engine""#));
-        assert!(script.contains("UV='/mnt/c/Program Files/App/uv/linux/uv'"));
-        assert!(script.contains(r#""$UV" python install 3.12 --no-bin"#));
-        assert!(script.contains(
-            r#""$UV" pip sync --python "$D/bin/python" '/mnt/c/Program Files/App/env/pylock.txt'"#
-        ));
-        assert!(script.contains("'numpy>=2'"));
-        assert!(script.contains("'/mnt/c/Program Files/App/wheels/app-1.0-py3-none-any.whl'"));
-        assert!(!script.contains("sudo") && !script.contains("apt "));
-        assert!(script.ends_with(r#"|| fail "The Environment is not what the app needs.""#));
-        // one venv, upgraded in place; fresh, made again
-        assert!(!script.contains("\nrm -rf \"$D\"\n"));
-        let fresh = install_steps(&own, &s, &recipe(), true).unwrap();
-        assert!(fresh[0].args[5].contains("\nrm -rf \"$D\"\n"));
-        assert_eq!(
-            own_environment(&own, &s.data, &recipe()).python,
-            Python::Path {
-                path: "~/.local/share/example-app/engine/bin/python".into()
-            }
-        );
-        assert!(install_steps(
-            &Own::Wsl {
-                distro: "a b".into()
-            },
-            &s,
-            &recipe(),
-            false
-        )
-        .is_err());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_install_in_wsl_without_uv_uses_the_distributions_python() {
-        let own = Own::Wsl {
-            distro: "Ubuntu".into(),
-        };
-        let steps = install_steps(&own, &shipped(), &recipe(), false).unwrap();
-        let script = &steps[0].args[5];
-        assert!(script.contains(r#"PY="$(command -v python3.12 || true)""#));
-        assert!(script.contains(
-            r#""$D/bin/python" -m pip install -r '/mnt/c/Program Files/App/env/pylock.txt'"#
-        ));
-        assert!(script.contains("--force-reinstall --no-deps"));
-        assert!(!script.contains("$UV"));
+        let wsl = Own::Wsl { distro: "U".into() };
+        assert!(wsl.supported_on(Os::Windows).is_ok() && wsl.supported_on(Os::Posix).is_err());
+        assert!(Own::Posix.supported_on(Os::Posix).is_ok());
+        assert!(Own::Posix.native() && Own::Windows.native() && !wsl.native());
     }
 
     #[test]
     fn the_gpu_probe_names_what_it_found() {
-        assert!(wsl_gpu_probe("").is_err() && wsl_gpu_probe("a;b").is_err());
+        assert!(wsl_gpu_probe("a;b").is_err());
         let p = wsl_gpu_probe("Ubuntu").unwrap();
         assert_eq!(p.args[5], GPU_PROBE);
+        // WSL's default distribution, as `wsl()` takes it
+        let d = wsl_gpu_probe("").unwrap();
+        assert_eq!(&d.args[..3], ["--exec", "bash", "-lc"]);
         let found = gpu_found(&["GPU\tGPU 0: NVIDIA GeForce RTX 4060 Ti (UUID: GPU-1)".into()]);
         assert_eq!(
             found.as_deref(),
@@ -787,122 +593,5 @@ mod tests {
         );
         assert_eq!(gpu_found(&[]), None);
         assert_eq!(gpu_found(&["GPU\t  ".into()]), None);
-    }
-
-    /// What a real install puts in: a lockfile with one small package, and a
-    /// second package on top, so both the sync and the install are run.
-    #[cfg(windows)]
-    fn real_recipe(data: &str) -> Recipe {
-        let lock = format!(r"{data}\pylock.txt");
-        std::fs::create_dir_all(data).unwrap();
-        std::fs::write(&lock, "six==1.17.0\n").unwrap();
-        Recipe {
-            name: "probe".into(),
-            app: "geokit-test".into(),
-            python: DEFAULT_PYTHON.into(),
-            lockfile: Some(lock),
-            packages: vec!["idna==3.10".into()],
-            wheels: vec![],
-            check: "import idna, six, sys; print(six.__version__); sys.exit(six.__version__ != '1.17.0')"
-                .into(),
-        }
-    }
-
-    #[cfg(windows)]
-    fn run(p: &Program) -> String {
-        let out = std::process::Command::new(&p.program)
-            .args(&p.args)
-            .envs(&p.env)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{} {:?}\n{}\n{}",
-            p.program,
-            p.args,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    }
-
-    /// An Environment installed for real from a Recipe on Windows, then its
-    /// Python started: set GEOKIT_UV to a uv.exe and GEOKIT_OWN_INSTALL to
-    /// an empty folder for the app's data, and run with `cargo test --
-    /// --ignored`. It downloads Python and two small packages.
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "downloads Python (GEOKIT_UV, GEOKIT_OWN_INSTALL)"]
-    fn installs_for_real_and_its_python_starts() {
-        let (Ok(uv), Ok(data)) = (
-            std::env::var("GEOKIT_UV"),
-            std::env::var("GEOKIT_OWN_INSTALL"),
-        ) else {
-            return;
-        };
-        let s = Shipped {
-            data: data.clone(),
-            uv,
-            uv_linux: None,
-        };
-        let r = real_recipe(&data);
-        let mut last = String::new();
-        for step in install_steps(&Own::Windows, &s, &r, false).unwrap() {
-            last = run(&step);
-        }
-        assert_eq!(last.trim(), "1.17.0");
-        // again, on the one made before: upgraded in place, not refused
-        for step in install_steps(&Own::Windows, &s, &r, false).unwrap() {
-            last = run(&step);
-        }
-        assert_eq!(last.trim(), "1.17.0");
-        let env = own_environment(&Own::Windows, &data, &r);
-        let p = python(&env, &["-c", "import sys; print(sys.version_info[:2])"]).unwrap();
-        assert_eq!(run(&p).trim(), "(3, 12)");
-    }
-
-    /// The same in WSL with uv for Linux, so no root and no apt: set
-    /// GEOKIT_WSL_DISTRO, GEOKIT_UV_LINUX to a Linux uv as Windows sees it
-    /// (`\\wsl.localhost\Ubuntu\home\me\.local\bin\uv` will do) and
-    /// GEOKIT_OWN_INSTALL as above. Its Environment is made fresh under
-    /// `~/.local/share/geokit-test` in that distribution.
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "downloads Python in WSL (GEOKIT_WSL_DISTRO, GEOKIT_UV_LINUX, GEOKIT_OWN_INSTALL)"]
-    fn installs_in_wsl_for_real_and_its_python_starts() {
-        let (Ok(distro), Ok(uv_linux), Ok(data)) = (
-            std::env::var("GEOKIT_WSL_DISTRO"),
-            std::env::var("GEOKIT_UV_LINUX"),
-            std::env::var("GEOKIT_OWN_INSTALL"),
-        ) else {
-            return;
-        };
-        let s = Shipped {
-            data: data.clone(),
-            uv: String::new(),
-            uv_linux: Some(uv_linux),
-        };
-        let r = real_recipe(&data);
-        let own = Own::Wsl {
-            distro: distro.clone(),
-        };
-        let steps = install_steps(&own, &s, &r, true).unwrap();
-        assert_eq!(run(&steps[0]).trim().lines().last(), Some("1.17.0"));
-        let env = own_environment(&own, &data, &r);
-        let p = python(
-            &env,
-            &[
-                "-c",
-                "import sys; print(sys.platform, sys.version_info[:2])",
-            ],
-        )
-        .unwrap();
-        assert_eq!(run(&p).trim(), "linux (3, 12)");
-        // the GPU probe, where the distribution reaches one
-        let probe = wsl_gpu_probe(&distro).unwrap();
-        let lines: Vec<String> = run(&probe).lines().map(str::to_owned).collect();
-        if let Some(gpu) = gpu_found(&lines) {
-            assert!(gpu.starts_with("GPU 0"));
-        }
     }
 }

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>geokit viewer playground</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--gk-viewport, #1f1f23);
+        color: var(--gk-fg, #eef0f6);
+        font: 13px/1.4 system-ui, sans-serif;
+      }
+      #view {
+        position: fixed;
+        inset: 0;
+      }
+      #view canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      #panel {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        display: grid;
+        gap: 6px;
+        padding: 8px;
+        max-width: 260px;
+        background: var(--gk-surface-1, #1b1b36);
+        border: 1px solid var(--gk-border, #34345a);
+        border-radius: 4px;
+      }
+      #panel .row {
+        display: grid;
+        gap: 2px;
+      }
+      #legend {
+        position: fixed;
+        right: 8px;
+        bottom: 8px;
+      }
+      #status {
+        margin: 0;
+        white-space: pre-wrap;
+        color: var(--gk-fg-muted, #9aa0b6);
+      }
+      #result {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="view"></div>
+    <div id="panel">
+      <strong>geokit viewer</strong>
+      <span>Click to pick. Shift-click adds a measuring point.</span>
+      <span>
+        <span>Section</span>
+        <select id="keep">
+          <option value="none">none</option>
+          <option value="behind">behind</option>
+          <option value="front">front</option>
+          <option value="band">band</option>
+          <option value="box-in">clip box, inside</option>
+          <option value="box-out">clip box, outside</option>
+        </select>
+      </span>
+      <div class="row"><span>Azimuth</span><input id="azimuth" type="range" min="0" max="360" value="0" /></div>
+      <div class="row"><span>Plunge</span><input id="plunge" type="range" min="0" max="90" value="0" /></div>
+      <div class="row"><span>Position</span><input id="position" type="range" min="-50" max="50" value="0" /></div>
+      <span>
+        <span>Colormap</span>
+        <select id="map">
+          <option value="Ember">Ember</option>
+          <option value="Viridis">Viridis</option>
+          <option value="Blue-Orange">Blue-Orange</option>
+          <option value="Cycle">Cycle</option>
+        </select>
+      </span>
+      <pre id="status">starting</pre>
+    </div>
+    <div id="legend"></div>
+    <pre id="result"></pre>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

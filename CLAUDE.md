@@ -12,7 +12,9 @@ closed, and CloudLabeller, which is GPL-3). Read README.md first.
   code that is not already published under a permissive licence — in
   particular nothing from CloudLabeller, which is GPL-3.
 - **Permissive dependencies only** (LICENSES.md). A dependency that fails
-  `pnpm licence-gate` is the maintainer's decision; never widen the allowlist.
+  `pnpm licence-gate` is the maintainer's decision: pinned in
+  `exceptions.json`, or its licence added to the allowlist. Never change
+  either without the maintainer's yes for that licence or package.
 - **Framework-free viewer.** `packages/viewer` imports no React.
 - **No Tauri in the crate.** The app wraps `geokit-env` in its own commands.
 - Keep `docs/provenance.md` current when something is taken from an app.

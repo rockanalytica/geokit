@@ -18,3 +18,18 @@ under Apache-2.0.
 | `crates/geokit-env/src/lease.rs`                                                                                                      | —                                                                | New: the GPU Lease.                                                                                                                                                                                                                                                                              |
 | `tools/licence-gate/`                                                                                                                 | `tools/licence-gate/`                                            | Paths for this layout; GeoScape's exceptions not carried over (none are needed); the notices generators left with the apps.                                                                                                                                                                      |
 | `tools/domain-gate/`                                                                                                                  | —                                                                | New.                                                                                                                                                                                                                                                                                             |
+
+## Since 0.1.0
+
+Written here, not taken from an app: `crates/geokit-env/src/install.rs`,
+`detect.rs`, `problem.rs`, `process/os.rs`, `process/scripted.rs`;
+`packages/viewer/src/host.ts`, `legend.ts`, `measure.ts`, `vec.ts`,
+`layers/blocks.ts`, `playground/`, and their tests;
+`packages/ui/src/contrast.test.ts`. The changes to the files above, listed
+in [CHANGELOG.md](../CHANGELOG.md), were written here too.
+
+| geokit                                         | Source                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VIRIDIS` in `packages/viewer/src/colormap.ts` | Values from github.com/BIDS/colormap (Smith, van der Walt, Firing), CC0 1.0: 64 stops sampled from its 256.                                                                                                                                                               |
+| `BLUE_ORANGE`, `CYCLE` in `colormap.ts`        | Made here in OKLab (Ottosson, 2020, public domain).                                                                                                                                                                                                                       |
+| `GLOSSARY.md`                                  | Terms the apps also use (Environment, Job, GPU Job, GPU Lease, Viewport, Point Cloud, Mesh, Colormap, Section). The definitions follow GeoScape's `CONTEXT.md`, worded with no domain; nothing is copied from CloudLabeller's glossary, which only shares the term names. |

@@ -35,7 +35,7 @@ export const FORBIDDEN = [
 ];
 
 const pattern = new RegExp(`\\b(${FORBIDDEN.join("|")})\\b`, "i");
-const SOURCE = /\.(ts|tsx|css|rs|mjs|js)$/;
+const SOURCE = /\.(ts|tsx|css|rs|mjs|js|html|glsl|md)$/;
 const SKIP = new Set(["node_modules", "target", "dist"]);
 
 /** The forbidden words in `text`, one finding per line that has one. */

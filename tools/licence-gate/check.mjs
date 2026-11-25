@@ -38,12 +38,64 @@ export function readTree() {
   return packages;
 }
 
-// "MIT", "(MIT OR Apache-2.0)", "MIT AND BSD-3-Clause", "MIT*" (guessed).
+// "MIT", "(MIT OR Apache-2.0)", "MIT AND BSD-3-Clause", "MIT*" (guessed),
+// "(MIT AND Zlib) OR GPL-3.0". AND binds tighter than OR, and parentheses
+// group, as SPDX says. "X WITH Y" is judged whole, so it passes only if the
+// allowlist names it whole. An expression that does not parse fails.
 export function permitted(expression) {
-  const clean = String(expression).replace(/[()]/g, "").replace(/\*/g, "").trim();
-  if (!clean) return false;
-  const orParts = clean.split(/\s+OR\s+/i);
-  return orParts.some((part) => part.split(/\s+AND\s+/i).every((id) => allow.has(id.trim())));
+  const tokens = String(expression)
+    .replace(/\*/g, "")
+    .replace(/([()])/g, " $1 ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length === 0) return false;
+  let at = 0;
+  const peek = () => tokens[at]?.toUpperCase();
+  const isWord = (t) => t !== undefined && !["(", ")", "AND", "OR", "WITH"].includes(t);
+
+  // Each returns whether its part is permitted, or null where it does not parse.
+  function anyOf() {
+    let ok = allOf();
+    while (ok !== null && peek() === "OR") {
+      at++;
+      const next = allOf();
+      ok = next === null ? null : ok || next;
+    }
+    return ok;
+  }
+  function allOf() {
+    let ok = one();
+    while (ok !== null && peek() === "AND") {
+      at++;
+      const next = one();
+      ok = next === null ? null : ok && next;
+    }
+    return ok;
+  }
+  function one() {
+    if (peek() === "(") {
+      at++;
+      const ok = anyOf();
+      if (peek() !== ")") return null;
+      at++;
+      return ok;
+    }
+    const id = tokens[at];
+    if (!isWord(id?.toUpperCase())) return null;
+    at++;
+    if (peek() === "WITH") {
+      at++;
+      const exception = tokens[at];
+      if (!isWord(exception?.toUpperCase())) return null;
+      at++;
+      return allow.has(`${id} WITH ${exception}`);
+    }
+    return allow.has(id);
+  }
+
+  const ok = anyOf();
+  return ok === true && at === tokens.length;
 }
 
 // Exception keys are exact "name@version", with "*" allowed as a wildcard so

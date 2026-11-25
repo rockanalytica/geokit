@@ -4,13 +4,13 @@
 // the side the viewer stands on, and a Behind, the far side. Scene-local
 // coordinates, Z up, Y north.
 
-import { directionAngles, sectionDirection } from "./direction";
-import type { SectionPlane } from "./types";
+import { sectionDirection } from "./direction";
+import type { Bounds, SectionPlane, Vec3 } from "./types";
+import { cross, dot, unit } from "./vec";
 
-// a Section's direction is the world's convention, which other directions share
-export { directionAngles, sectionDirection };
-
-export type Vec3 = [number, number, number];
+// kept for callers of the subpath: the types and `dot` live in one place each
+export type { Vec3 };
+export { dot };
 
 /** What a Section keeps: one side of the plane, or a band half a step either side of it. */
 export type SectionKeep = "front" | "behind" | "band";
@@ -25,17 +25,6 @@ export interface SectionGeometry {
   /** Spacing to the next Section of a series, metres; a band is half of it either side. */
   step: number;
 }
-
-export const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const cross = (a: Vec3, b: Vec3): Vec3 => [
-  a[1] * b[2] - a[2] * b[1],
-  a[2] * b[0] - a[0] * b[2],
-  a[0] * b[1] - a[1] * b[0],
-];
-const unit = (a: Vec3): Vec3 => {
-  const n = Math.hypot(a[0], a[1], a[2]) || 1;
-  return [a[0] / n, a[1] / n, a[2] / n];
-};
 
 /**
  * Up on screen when the Section is faced: the vertical as it lies in the
@@ -110,11 +99,7 @@ export function atPosition<T extends SectionGeometry>(g: T, position: number): T
 }
 
 /** The positions a direction takes across a box: the slider's ends. */
-export function positionRange(
-  bounds: { min: Vec3; max: Vec3 },
-  azimuth: number,
-  plunge: number,
-): [number, number] {
+export function positionRange(bounds: Bounds, azimuth: number, plunge: number): [number, number] {
   const d = sectionDirection(azimuth, plunge);
   let lo = Infinity;
   let hi = -Infinity;
@@ -151,32 +136,94 @@ export function planeCrossing(
   plane: SectionPlane,
 ): Float32Array {
   const [a, b, c] = plane.normal;
-  const out: number[] = [];
-  const side = (v: number) =>
-    a * (vertices[v * 3] ?? 0) +
-    b * (vertices[v * 3 + 1] ?? 0) +
-    c * (vertices[v * 3 + 2] ?? 0) +
-    plane.distance;
-  const at = (i: number, j: number, si: number, sj: number) => {
-    const t = si / (si - sj);
+  // each vertex's side once, then the faces counted, then the output filled
+  // to its exact size: no growing array, no second copy
+  const nv = Math.floor(vertices.length / 3);
+  const side = new Float32Array(nv);
+  for (let v = 0; v < nv; v++)
+    side[v] =
+      a * (vertices[v * 3] ?? 0) +
+      b * (vertices[v * 3 + 1] ?? 0) +
+      c * (vertices[v * 3 + 2] ?? 0) +
+      plane.distance;
+  const crossed = (f: number): boolean => {
+    const s0 = (side[faces[f] ?? 0] ?? 0) >= 0;
+    const s1 = (side[faces[f + 1] ?? 0] ?? 0) >= 0;
+    const s2 = (side[faces[f + 2] ?? 0] ?? 0) >= 0;
+    // a triangle is crossed on exactly two edges, or none
+    return !(s0 === s1 && s1 === s2);
+  };
+  let n = 0;
+  for (let f = 0; f + 2 < faces.length; f += 3) if (crossed(f)) n++;
+  const out = new Float32Array(n * 6);
+  let o = 0;
+  const at = (i: number, j: number) => {
+    const si = side[i] ?? 0;
+    const t = si / (si - (side[j] ?? 0));
     for (let k = 0; k < 3; k++) {
       const p = vertices[i * 3 + k] ?? 0;
-      out.push(p + t * ((vertices[j * 3 + k] ?? 0) - p));
+      out[o++] = p + t * ((vertices[j * 3 + k] ?? 0) - p);
     }
   };
   for (let f = 0; f + 2 < faces.length; f += 3) {
-    const v = [faces[f] ?? 0, faces[f + 1] ?? 0, faces[f + 2] ?? 0];
-    const s = v.map(side);
-    const before = out.length;
+    if (!crossed(f)) continue;
+    const v = [faces[f] ?? 0, faces[f + 1] ?? 0, faces[f + 2] ?? 0] as const;
     for (let e = 0; e < 3; e++) {
-      const i = e;
-      const j = (e + 1) % 3;
-      const si = s[i] ?? 0;
-      const sj = s[j] ?? 0;
-      if (si >= 0 !== sj >= 0) at(v[i] ?? 0, v[j] ?? 0, si, sj);
+      const i = v[e] ?? 0;
+      const j = v[(e + 1) % 3] ?? 0;
+      if ((side[i] ?? 0) >= 0 !== (side[j] ?? 0) >= 0) at(i, j);
     }
-    // a triangle is crossed on exactly two edges, or none
-    if (out.length - before !== 6) out.length = before;
   }
-  return Float32Array.from(out);
+  return out;
+}
+
+/**
+ * What a layer host clips and cuts by. `planes` clip what lies behind any
+ * one of them (n·p + d < 0); with `intersect` they clip only what lies behind
+ * all of them at once, so a box's planes cut the box out instead of
+ * keeping it. `cut` is the plane a Mesh is drawn crossing, in Section view.
+ */
+export interface SectionSpec {
+  planes: SectionPlane[];
+  intersect: boolean;
+  cut: SectionPlane | null;
+}
+
+/** A Section's spec: its planes for what it keeps, and itself as the cut. */
+export function sectionSpec(g: SectionGeometry, keep: SectionKeep): SectionSpec {
+  return { planes: sectionPlanes(g, keep), intersect: false, cut: sectionPlane(g) };
+}
+
+/**
+ * The six planes of a box, normals pointing in, so what is inside is kept; or
+ * pointing out (`outward`), so what is behind all six at once is the box.
+ */
+export function boxPlanes(box: Bounds, outward = false): SectionPlane[] {
+  const { min, max } = box;
+  const planes: SectionPlane[] = [
+    { normal: [1, 0, 0], distance: -min[0] },
+    { normal: [-1, 0, 0], distance: max[0] },
+    { normal: [0, 1, 0], distance: -min[1] },
+    { normal: [0, -1, 0], distance: max[1] },
+    { normal: [0, 0, 1], distance: -min[2] },
+    { normal: [0, 0, -1], distance: max[2] },
+  ];
+  return outward
+    ? planes.map((p) => ({
+        normal: [-p.normal[0], -p.normal[1], -p.normal[2]],
+        distance: -p.distance,
+      }))
+    : planes;
+}
+
+/** A clip box: only what is inside it drawn, or only what is outside. No Mesh cut. */
+export function clipBox(box: Bounds, keep: "inside" | "outside"): SectionSpec {
+  // outside: the box is what lies behind all six outward planes, and only that is clipped
+  return { planes: boxPlanes(box, keep === "outside"), intersect: keep === "outside", cut: null };
+}
+
+/** Whether a point is drawn under a spec, as the GPU will decide it. */
+export function keeps(spec: Pick<SectionSpec, "planes" | "intersect">, p: Vec3): boolean {
+  const behind = spec.planes.map((q) => dot(q.normal, p) + q.distance < 0);
+  return spec.intersect ? !behind.every(Boolean) : !behind.some(Boolean);
 }
