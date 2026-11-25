@@ -5,8 +5,11 @@
 // when it has installed it. The page names an Environment when it starts
 // something, and one not on the list is refused.
 
+use crate::problem::Problem;
+use crate::programs::DEFAULT_PYTHON;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -16,6 +19,26 @@ pub enum Machine {
     Windows,
     Wsl,
     Posix,
+}
+
+impl Machine {
+    /// What starts the Python an Environment of `Python::Default` names: the
+    /// one place this is spelled.
+    pub fn default_python(&self) -> String {
+        match self {
+            Machine::Windows => "python".into(),
+            Machine::Wsl => format!("python{DEFAULT_PYTHON}"),
+            Machine::Posix => "python3".into(),
+        }
+    }
+
+    /// What starts conda, where `Python::Conda` is used.
+    pub fn conda(&self) -> &'static str {
+        match self {
+            Machine::Windows => "conda.exe",
+            Machine::Wsl | Machine::Posix => "conda",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,7 +56,7 @@ pub struct Environment {
     pub python: Python,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Kept {
     pub environment: Environment,
     /// Made by the app itself (its own install), rather than given by the user.
@@ -43,7 +66,7 @@ pub struct Kept {
     pub installed: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct List {
     pub environments: Vec<Kept>,
     pub default: Option<usize>,
@@ -85,8 +108,11 @@ impl Environment {
     }
 
     /// Why it cannot be used, or None: the shape of what the core will put
-    /// on a command line.
-    pub fn problem(&self) -> Option<&'static str> {
+    /// on a command line. The codes are `env.quote`, `env.control`,
+    /// `env.cmd`, `env.distro`, `env.path_empty`, `env.path_windows`,
+    /// `env.path_posix` and `env.conda_name`.
+    pub fn problem(&self) -> Option<Problem> {
+        let no = |code: &str, english: &str| Some(Problem::new(code, english));
         let mut texts = vec![self.distro.as_str()];
         match &self.python {
             Python::Path { path } => texts.push(path),
@@ -94,26 +120,32 @@ impl Environment {
             Python::Default => {}
         }
         if texts.iter().any(|s| s.contains('"')) {
-            return Some("quote");
+            return no("env.quote", "A quotation mark cannot be used here.");
         }
         if texts.iter().any(|s| control(s)) {
-            return Some("control");
+            return no("env.control", "A control character cannot be used here.");
         }
         if self.machine != Machine::Posix
             && texts
                 .iter()
                 .any(|s| s.contains(&CMD_SPECIAL[..]) || s.contains('^'))
         {
-            return Some("cmd");
+            return no(
+                "env.cmd",
+                "One of % ! & | < > ^ cannot be used in a Windows command.",
+            );
         }
         if self.machine == Machine::Wsl && !word(self.distro.trim()) {
-            return Some("distro");
+            return Some(
+                Problem::new("env.distro", "That is not a WSL distribution's name.")
+                    .with("distro", self.distro.trim()),
+            );
         }
         match &self.python {
             Python::Path { path } => {
                 let p = path.trim();
                 if p.is_empty() {
-                    return Some("path_empty");
+                    return no("env.path_empty", "A path is needed.");
                 }
                 let windows_abs = p.len() > 2
                     && p.as_bytes()[0].is_ascii_alphabetic()
@@ -121,16 +153,19 @@ impl Environment {
                     && matches!(p.as_bytes()[2], b'\\' | b'/')
                     || p.starts_with(r"\\");
                 if self.machine == Machine::Windows && !windows_abs {
-                    return Some("path_windows");
+                    return no("env.path_windows", "A full Windows path is needed.");
                 }
                 if self.machine != Machine::Windows
                     && !(p.starts_with('/') || p.starts_with("~/") || word(p))
                 {
-                    return Some("path_posix");
+                    return no(
+                        "env.path_posix",
+                        "A full path (or one from ~/) or a command name is needed.",
+                    );
                 }
             }
             Python::Conda { name } if !word(name.trim()) || name.trim().is_empty() => {
-                return Some("conda_name")
+                return no("env.conda_name", "That is not a conda environment's name.");
             }
             _ => {}
         }
@@ -148,11 +183,7 @@ impl Environment {
         let python = match &self.python {
             Python::Path { path } => path.clone(),
             Python::Conda { name } => format!("conda run -n {name}"),
-            Python::Default => match self.machine {
-                Machine::Windows => "python".into(),
-                Machine::Wsl => format!("python{}", crate::programs::DEFAULT_PYTHON),
-                Machine::Posix => "python3".into(),
-            },
+            Python::Default => self.machine.default_python(),
         };
         format!("{machine}: {python}")
     }
@@ -166,13 +197,39 @@ fn same_place(a: &Environment, b: &Environment) -> bool {
 pub struct Environments {
     file: Option<PathBuf>,
     list: Mutex<List>,
+    /// What was wrong with the file when it was read, if anything.
+    load_problem: Option<Problem>,
+    /// Set when the file could not be read at all: it may well be fine, so
+    /// nothing is written over it.
+    blocked: bool,
 }
 
 /// The name of the list's file in the app's data folder.
 pub const FILE: &str = "environments.json";
 
+/// `file` moved aside under the first name not taken: `.bad`, `.bad.1`, …
+fn keep_aside(file: &Path) -> io::Result<PathBuf> {
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned());
+    let name = name.unwrap_or_else(|| FILE.into());
+    for n in 0.. {
+        let ext = if n == 0 {
+            format!("{name}.bad")
+        } else {
+            format!("{name}.bad.{n}")
+        };
+        let to = file.with_file_name(ext);
+        if !to.exists() {
+            fs::rename(file, &to)?;
+            return Ok(to);
+        }
+    }
+    unreachable!()
+}
+
 impl Environments {
-    /// The list kept in `data`, or an empty one where there is none yet.
+    /// The list kept in `data`, or an empty one where there is none yet. A
+    /// file that cannot be understood is kept aside (`environments.json.bad`)
+    /// and the list is empty; `load_problem` says so.
     pub fn load(data: &Path) -> Self {
         Self::load_with(data, |_| {})
     }
@@ -181,17 +238,57 @@ impl Environments {
     /// app moves what an older version of it wrote.
     pub fn load_with(data: &Path, migrate: impl FnOnce(&mut serde_json::Value)) -> Self {
         let file = data.join(FILE);
-        let list = fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|mut v| {
-                migrate(&mut v);
-                serde_json::from_value::<List>(v).ok()
-            })
-            .unwrap_or_default();
+        let mut load_problem = None;
+        let mut blocked = false;
+        let mut list = match fs::read(&file) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => List::default(),
+            Err(e) => {
+                blocked = true;
+                load_problem = Some(
+                    Problem::new(
+                        "env.load_read",
+                        "The list of Environments could not be read.",
+                    )
+                    .because(e),
+                );
+                List::default()
+            }
+            Ok(bytes) => {
+                match serde_json::from_slice::<serde_json::Value>(&bytes).and_then(|mut v| {
+                    migrate(&mut v);
+                    serde_json::from_value::<List>(v)
+                }) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        let mut p = Problem::new(
+                        "env.load_corrupt",
+                        "The list of Environments could not be understood; it was kept aside and the list is empty.",
+                    )
+                    .because(e);
+                        match keep_aside(&file) {
+                            Ok(to) => p = p.with("kept", to.display().to_string()),
+                            Err(e) => {
+                                // not moved: not written over either
+                                blocked = true;
+                                p = p.with("kept_failed", e.to_string());
+                            }
+                        }
+                        log::warn!("{p}");
+                        load_problem = Some(p);
+                        List::default()
+                    }
+                }
+            }
+        };
+        // a default past the end of the list is no default
+        if list.default.is_some_and(|d| d >= list.environments.len()) {
+            list.default = None;
+        }
         Environments {
             file: Some(file),
             list: Mutex::new(list),
+            load_problem,
+            blocked,
         }
     }
 
@@ -200,48 +297,91 @@ impl Environments {
         Environments {
             file: None,
             list: Mutex::new(List::default()),
+            load_problem: None,
+            blocked: false,
         }
     }
 
+    /// What was wrong with the kept list when it was loaded: it could not be
+    /// read, or understood (then it is kept aside). None when all was well.
+    pub fn load_problem(&self) -> Option<&Problem> {
+        self.load_problem.as_ref()
+    }
+
     pub fn list(&self) -> List {
-        self.list.lock().map(|l| l.clone()).unwrap_or_default()
+        crate::locked(&self.list).clone()
     }
 
     /// Whether `env` is on the list, as it is written there.
     pub fn has(&self, env: &Environment) -> bool {
         let env = env.trimmed();
-        self.list
-            .lock()
-            .map(|l| l.environments.iter().any(|k| k.environment == env))
-            .unwrap_or(false)
+        crate::locked(&self.list)
+            .environments
+            .iter()
+            .any(|k| k.environment == env)
+    }
+
+    /// What is kept of `env`, if it is on the list.
+    pub fn get(&self, env: &Environment) -> Option<Kept> {
+        let env = env.trimmed();
+        crate::locked(&self.list)
+            .environments
+            .iter()
+            .find(|k| k.environment == env)
+            .cloned()
     }
 
     /// The default Environment, if the list has one.
     pub fn default_environment(&self) -> Option<Environment> {
-        let l = self.list.lock().ok()?;
+        let l = crate::locked(&self.list);
         l.environments
             .get(l.default?)
             .map(|k| k.environment.clone())
     }
 
-    fn change(&self, f: impl FnOnce(&mut List) -> Result<(), String>) -> Result<List, String> {
-        let mut l = self.list.lock().map_err(|e| e.to_string())?;
-        f(&mut l)?;
-        if let Some(file) = &self.file {
-            let json = serde_json::to_vec_pretty(&*l).map_err(|e| e.to_string())?;
-            let part = file.with_extension("json.part");
-            fs::write(&part, json).map_err(|e| e.to_string())?;
-            fs::rename(&part, file).map_err(|e| e.to_string())?;
+    /// `f` applied to the list and the result written; if either fails the
+    /// list stays as it was.
+    fn change(&self, f: impl FnOnce(&mut List) -> Result<(), Problem>) -> Result<List, Problem> {
+        if self.blocked {
+            return Err(self.load_problem.clone().unwrap_or_else(|| {
+                Problem::new(
+                    "env.load_read",
+                    "The list of Environments could not be read.",
+                )
+            }));
+        }
+        let mut l = crate::locked(&self.list);
+        let before = l.clone();
+        let done = f(&mut l).and_then(|()| self.write(&l));
+        if let Err(e) = done {
+            *l = before;
+            return Err(e);
         }
         Ok(l.clone())
     }
 
+    fn write(&self, l: &List) -> Result<(), Problem> {
+        let Some(file) = &self.file else {
+            return Ok(());
+        };
+        let no = |e: &dyn std::fmt::Display| {
+            Problem::new("env.write", "The list of Environments could not be saved.").because(e)
+        };
+        let json = serde_json::to_vec_pretty(l).map_err(|e| no(&e))?;
+        let part = file.with_extension("json.part");
+        fs::write(&part, json).map_err(|e| no(&e))?;
+        fs::rename(&part, file).map_err(|e| {
+            let _ = fs::remove_file(&part);
+            no(&e)
+        })
+    }
+
     /// `env` put on the list, where it is not there yet, and made the default.
     /// The caller has the user's yes, or made it itself (`own`).
-    pub fn add(&self, env: &Environment, own: bool) -> Result<List, String> {
+    pub fn add(&self, env: &Environment, own: bool) -> Result<List, Problem> {
         let env = env.trimmed();
         if let Some(why) = env.problem() {
-            return Err(format!("refused Environment: {why}"));
+            return Err(why);
         }
         self.change(|l| {
             let at = match l.environments.iter().position(|k| k.environment == env) {
@@ -261,11 +401,12 @@ impl Environments {
     }
 
     /// The app's own Environment, just installed with `installed`, put on the
-    /// list as the default, in place of the one it made before on the same machine.
-    pub fn add_own(&self, env: &Environment, installed: &str) -> Result<List, String> {
+    /// list as the default, in place of the one it made before on the same
+    /// machine. (The older one's folder is left where it is.)
+    pub fn add_own(&self, env: &Environment, installed: &str) -> Result<List, Problem> {
         let env = env.trimmed();
         if let Some(why) = env.problem() {
-            return Err(format!("refused Environment: {why}"));
+            return Err(why);
         }
         self.change(|l| {
             l.environments
@@ -290,21 +431,31 @@ impl Environments {
         })
     }
 
-    pub fn set_default(&self, index: usize) -> Result<List, String> {
+    /// `env` made the default. Named by value, not by place: a page holding
+    /// an older list cannot choose another Environment than the one it saw.
+    pub fn set_default(&self, env: &Environment) -> Result<List, Problem> {
+        let env = env.trimmed();
         self.change(|l| {
-            if index >= l.environments.len() {
-                return Err("no such Environment".into());
-            }
-            l.default = Some(index);
+            let at = l
+                .environments
+                .iter()
+                .position(|k| k.environment == env)
+                .ok_or_else(not_listed)?;
+            l.default = Some(at);
             Ok(())
         })
     }
 
-    pub fn remove(&self, index: usize) -> Result<List, String> {
+    /// `env` taken off the list (its folder, if it has one, is left; see
+    /// `install::uninstall`). Named by value, as for `set_default`.
+    pub fn remove(&self, env: &Environment) -> Result<List, Problem> {
+        let env = env.trimmed();
         self.change(|l| {
-            if index >= l.environments.len() {
-                return Err("no such Environment".into());
-            }
+            let index = l
+                .environments
+                .iter()
+                .position(|k| k.environment == env)
+                .ok_or_else(not_listed)?;
             l.environments.remove(index);
             l.default = match l.default {
                 Some(d) if d == index => (!l.environments.is_empty()).then_some(0),
@@ -314,6 +465,10 @@ impl Environments {
             Ok(())
         })
     }
+}
+
+fn not_listed() -> Problem {
+    Problem::new("env.not_listed", "That Environment is not on the list.")
 }
 
 #[cfg(test)]
@@ -328,41 +483,43 @@ mod tests {
         }
     }
 
+    fn code(e: &Environment) -> Option<String> {
+        e.problem().map(|p| p.code)
+    }
+
     #[test]
     fn checked_for_the_command_line() {
+        let c = |s: &str| Some(s.to_string());
+        assert_eq!(code(&path(Machine::Windows, "", r"C:\py\python.exe")), None);
         assert_eq!(
-            path(Machine::Windows, "", r"C:\py\python.exe").problem(),
+            code(&path(Machine::Windows, "", "python.exe")),
+            c("env.path_windows")
+        );
+        assert_eq!(
+            code(&path(Machine::Windows, "", r"C:\a&b\python.exe")),
+            c("env.cmd")
+        );
+        assert_eq!(
+            code(&path(Machine::Wsl, "Ubuntu", "~/.venvs/g/bin/python")),
             None
         );
         assert_eq!(
-            path(Machine::Windows, "", "python.exe").problem(),
-            Some("path_windows")
+            code(&path(Machine::Wsl, "Ubu ntu", "/usr/bin/python3")),
+            c("env.distro")
         );
         assert_eq!(
-            path(Machine::Windows, "", r"C:\a&b\python.exe").problem(),
-            Some("cmd")
+            code(&path(Machine::Wsl, "Ubuntu", "C:\\x")),
+            c("env.path_posix")
         );
-        assert_eq!(
-            path(Machine::Wsl, "Ubuntu", "~/.venvs/g/bin/python").problem(),
-            None
-        );
-        assert_eq!(
-            path(Machine::Wsl, "Ubu ntu", "/usr/bin/python3").problem(),
-            Some("distro")
-        );
-        assert_eq!(
-            path(Machine::Wsl, "Ubuntu", "C:\\x").problem(),
-            Some("path_posix")
-        );
-        assert_eq!(path(Machine::Posix, "", "/a\"b").problem(), Some("quote"));
-        assert_eq!(path(Machine::Posix, "", "/a\nb").problem(), Some("control"));
+        assert_eq!(code(&path(Machine::Posix, "", "/a\"b")), c("env.quote"));
+        assert_eq!(code(&path(Machine::Posix, "", "/a\nb")), c("env.control"));
         let conda = |n: &str| Environment {
             machine: Machine::Windows,
             distro: String::new(),
             python: Python::Conda { name: n.into() },
         };
-        assert_eq!(conda("tools").problem(), None);
-        assert_eq!(conda("to ols").problem(), Some("conda_name"));
+        assert_eq!(code(&conda("tools")), None);
+        assert_eq!(code(&conda("to ols")), c("env.conda_name"));
     }
 
     #[test]
@@ -382,11 +539,33 @@ mod tests {
             .unwrap();
         assert_eq!((l.environments.len(), l.default), (2, Some(0)));
         assert!(e.has(&a));
-        let l = e.remove(0).unwrap();
+        let l = e.remove(&a).unwrap();
         assert_eq!((l.environments.len(), l.default), (1, Some(0)));
         assert!(!e.has(&a));
         assert!(e.add(&path(Machine::Windows, "", "python"), false).is_err());
-        assert!(e.set_default(5).is_err() && e.remove(5).is_err());
+    }
+
+    #[test]
+    fn a_page_with_a_stale_list_changes_what_it_saw_or_nothing() {
+        let e = Environments::in_memory();
+        let a = path(Machine::Windows, "", r"C:\a\python.exe");
+        let b = path(Machine::Wsl, "Ubuntu", "~/b/bin/python");
+        let c = path(Machine::Posix, "", "/c/bin/python");
+        e.add(&a, false).unwrap();
+        e.add(&b, false).unwrap();
+        e.add(&c, false).unwrap();
+        // the page saw [a, b, c]; a is removed elsewhere; the page asks for b
+        e.remove(&a).unwrap();
+        let l = e.set_default(&b).unwrap();
+        assert_eq!(l.environments[l.default.unwrap()].environment, b);
+        // and asks to remove a, which is gone: not the one that took its place
+        let err = e.remove(&a).unwrap_err();
+        assert_eq!(err.code, "env.not_listed");
+        assert_eq!(e.list().environments.len(), 2);
+        assert_eq!(e.set_default(&a).unwrap_err().code, "env.not_listed");
+        // a default kept by value follows its Environment as others go
+        let l = e.remove(&c).unwrap();
+        assert_eq!(l.default, Some(0));
     }
 
     #[test]
@@ -418,12 +597,14 @@ mod tests {
             l.environments[l.default.unwrap()].installed.as_deref(),
             Some("1.3.0")
         );
+        assert_eq!(e.get(&new).unwrap().installed.as_deref(), Some("1.3.0"));
     }
 
     #[test]
     fn kept_on_disk_and_read_back_through_a_migration() {
         let dir = tempfile::tempdir().unwrap();
         let e = Environments::load(dir.path());
+        assert!(e.load_problem().is_none());
         let a = path(Machine::Windows, "", r"C:\a\python.exe");
         e.add_own(&a, "1.0.0").unwrap();
         assert!(dir.path().join(FILE).exists());
@@ -441,16 +622,88 @@ mod tests {
                 k["installed"] = old;
             }
         });
+        assert!(moved.load_problem().is_none());
         assert_eq!(
             moved.list().environments[0].installed.as_deref(),
             Some("0.9")
         );
-        // unreadable, it is an empty list rather than an error
-        std::fs::write(dir.path().join(FILE), b"not json").unwrap();
-        assert!(Environments::load(dir.path())
-            .list()
-            .environments
-            .is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_list_is_kept_aside_and_said_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        std::fs::write(&file, b"not json").unwrap();
+        let e = Environments::load(dir.path());
+        assert!(e.list().environments.is_empty());
+        let p = e.load_problem().unwrap();
+        assert_eq!(p.code, "env.load_corrupt");
+        assert_eq!(
+            std::fs::read(dir.path().join("environments.json.bad")).unwrap(),
+            b"not json"
+        );
+        // the next change does not lose it
+        e.add(&path(Machine::Posix, "", "/p/bin/python"), false)
+            .unwrap();
+        assert!(Environments::load(dir.path()).load_problem().is_none());
+        assert!(dir.path().join("environments.json.bad").exists());
+        // a second one does not overwrite the first
+        std::fs::write(&file, b"{").unwrap();
+        Environments::load(dir.path());
+        assert_eq!(
+            std::fs::read(dir.path().join("environments.json.bad")).unwrap(),
+            b"not json"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("environments.json.bad.1")).unwrap(),
+            b"{"
+        );
+    }
+
+    #[test]
+    fn a_default_past_the_end_is_no_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE), r#"{"environments":[],"default":3}"#).unwrap();
+        let e = Environments::load(dir.path());
+        assert_eq!(e.list().default, None);
+        assert_eq!(e.default_environment(), None);
+    }
+
+    #[test]
+    fn a_change_that_cannot_be_written_is_not_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = Environments::load(dir.path());
+        let a = path(Machine::Posix, "", "/a/bin/python");
+        e.add(&a, false).unwrap();
+        // the folder gone: the write fails
+        let gone = dir.path().join("gone");
+        std::fs::create_dir(&gone).unwrap();
+        let e = Environments::load(&gone);
+        e.add(&a, false).unwrap();
+        std::fs::remove_dir_all(&gone).unwrap();
+        let b = path(Machine::Posix, "", "/b/bin/python");
+        let err = e.add(&b, false).unwrap_err();
+        assert_eq!(err.code, "env.write");
+        assert!(!e.has(&b), "memory is what is on disk");
+        assert_eq!(e.list().environments.len(), 1);
+        assert_eq!(e.remove(&a).unwrap_err().code, "env.write");
+        assert!(e.has(&a));
+    }
+
+    #[test]
+    fn a_poisoned_list_is_still_read() {
+        let e = std::sync::Arc::new(Environments::in_memory());
+        let e2 = e.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = e2.list.lock().unwrap();
+            panic!("a holder panicked");
+        })
+        .join();
+        assert!(e.list.is_poisoned());
+        assert!(e.list().environments.is_empty());
+        e.add(&path(Machine::Posix, "", "/a/bin/python"), false)
+            .unwrap();
+        assert!(e.default_environment().is_some());
     }
 
     #[test]
@@ -465,5 +718,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(d.described(), "Windows: python");
+        assert_eq!(Machine::Wsl.default_python(), "python3.12");
     }
 }

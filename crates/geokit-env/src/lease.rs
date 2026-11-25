@@ -73,6 +73,7 @@ impl Drop for Held {
         let mut q = self.inner.queue();
         if q.holder.as_ref().is_some_and(|(id, _)| *id == self.id) {
             q.holder = None;
+            log::debug!("GPU Lease given back by {:?}", self.job);
         }
         drop(q);
         self.inner.changed.notify_all();
@@ -97,6 +98,7 @@ impl GpuLease {
         q.next += 1;
         let id = q.next;
         q.holder = Some((id, job.to_string()));
+        log::debug!("GPU Lease held by {job:?}");
         Some(Held {
             inner: self.inner.clone(),
             id,
@@ -118,12 +120,14 @@ impl GpuLease {
         q.next += 1;
         let id = q.next;
         q.waiting.push_back((id, job.to_string()));
+        log::debug!("{job:?} waits for the GPU Lease");
         let mut told = 0;
         loop {
             let place = q.waiting.iter().position(|(i, _)| *i == id).map(|p| p + 1);
             if q.holder.is_none() && place == Some(1) {
                 q.waiting.pop_front();
                 q.holder = Some((id, job.to_string()));
+                log::debug!("GPU Lease held by {job:?}");
                 drop(q);
                 // the next in the queue moves up a place
                 self.inner.changed.notify_all();
@@ -143,6 +147,7 @@ impl GpuLease {
             }
             if cancelled() {
                 q.waiting.retain(|(i, _)| *i != id);
+                log::debug!("{job:?} gave up waiting for the GPU Lease");
                 drop(q);
                 self.inner.changed.notify_all();
                 return None;
@@ -169,8 +174,10 @@ impl GpuLease {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::tests::{collect, shell};
+    use crate::process::scripted::{Script, Scripted};
+    use crate::process::tests::collect;
     use crate::process::Processes;
+    use crate::programs::program;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
@@ -294,21 +301,39 @@ mod tests {
     #[test]
     fn a_gpu_job_keeps_the_lease_until_its_program_ends() {
         let lease = GpuLease::new();
-        let ps = Processes::default();
+        // a program that takes a moment
+        let ps = Processes::new(Arc::new(Scripted::always(
+            Script::ok().runs_for(Duration::from_millis(200)),
+        )));
         let (sink, _) = collect();
         let held = lease.hold("extract features", never, |_| {}).unwrap();
-        // a program that takes a moment
-        let slow = if cfg!(windows) {
-            shell("ping -n 2 127.0.0.1 >NUL")
-        } else {
-            shell("sleep 1")
-        };
-        let (_, ended) = ps.start_holding(&slow, sink, held).unwrap();
+        let (_, ended) = ps.start_holding(&program("x", &[]), sink, held).unwrap();
         assert_eq!(lease.state().holder.as_deref(), Some("extract features"));
         assert!(lease.try_hold("predict one").is_none());
         ended.recv_timeout(LONG).unwrap();
         until(&lease, LeaseState::default());
         assert!(lease.try_hold("predict one").is_some());
+    }
+
+    #[test]
+    fn a_killed_gpu_job_gives_the_lease_back_only_once_its_tree_is_gone() {
+        let lease = GpuLease::new();
+        let sp = Arc::new(Scripted::always(
+            Script::ok()
+                .until_killed()
+                .takes_to_die(Duration::from_millis(400)),
+        ));
+        let ps = Processes::new(sp);
+        let (sink, _) = collect();
+        let held = lease.hold("train", never, |_| {}).unwrap();
+        let (id, ended) = ps.start_holding(&program("x", &[]), sink, held).unwrap();
+        ps.kill(id);
+        // its main program is gone as far as the page asked, but the tree is not
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(lease.state().holder.as_deref(), Some("train"));
+        assert!(lease.try_hold("predict one").is_none());
+        ended.recv_timeout(LONG).unwrap();
+        until(&lease, LeaseState::default());
     }
 
     #[test]

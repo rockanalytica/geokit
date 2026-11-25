@@ -3,13 +3,33 @@
 // instanced everything. Ids are 24-bit, allocated by the Viewer so they are
 // unique across layers; 0 is the background.
 
-import type { Light, Object3D } from "three";
+import {
+  FrontSide,
+  type IUniform,
+  type Light,
+  type Material,
+  NoBlending,
+  type Object3D,
+  type Plane,
+  ShaderMaterial,
+  type Side,
+} from "three";
 import { Problem } from "./problem";
+import type { SectionPlane, Vec3 } from "./types";
+
+/**
+ * The passes of a pick. `id` draws each element's id; `detail` draws, for a
+ * layer whose elements are too many for an id each (a Point Cloud), the
+ * index of the element within what the id named.
+ */
+export type PickPass = "id" | "detail";
 
 /** What a pick lands on, as the layer that owns it reports. */
 export type PickTarget =
   | { kind: "interval"; table: string; index: number }
   | { kind: "element"; index: number }
+  /** One point of a Point Cloud: its node, its index in that node, and where it is (scene-local). */
+  | { kind: "point"; node: string; index: number; position: Vec3 }
   | { kind: "mesh" };
 
 /** A layer that can render its ids and name what an id is. */
@@ -17,17 +37,113 @@ export interface Pickable {
   /** What it adds to the scene. */
   readonly object: Object3D;
   /** Swap to id materials; hide what has no id. */
-  enterPick(): void;
+  enterPick(pass?: PickPass): void;
   exitPick(): void;
-  resolvePick(id: number): PickTarget | null;
+  /** What `id` is, if it is this layer's; `detail` is the second pass's index, for a layer that has one. */
+  resolvePick(id: number, detail?: number): PickTarget | null;
+  /** True when `id` alone is not enough: the host then renders the `detail` pass and reads it. */
+  readonly needsDetail?: boolean;
 }
 
-/** A GLSL expression for the colour that encodes `id` (a float holding an integer). */
+/** GLSL for the colour that encodes `id` (a float holding an integer): `encodePick` is its twin. */
 export const PICK_ENCODE = /* glsl */ `
   vec3 pickColour(float id) {
     return vec3(mod(id, 256.0), mod(floor(id / 256.0), 256.0), floor(id / 65536.0)) / 255.0;
   }
 `;
+
+/** The bytes `PICK_ENCODE` makes of `id`, which `decodePick` reads back. */
+export function encodePick(id: number): [number, number, number] {
+  return [id % 256, Math.floor(id / 256) % 256, Math.floor(id / 65536)];
+}
+
+// The clipping chunks every shader of the kit includes, in one place: a
+// layer's own colour pass and its id pass clip alike, so what cannot be seen
+// cannot be picked. `clipping: true` on the material turns them on.
+export const CLIP_VERT_PARS = "#include <clipping_planes_pars_vertex>";
+export const CLIP_VERT = "#include <clipping_planes_vertex>";
+export const CLIP_FRAG_PARS = "#include <clipping_planes_pars_fragment>";
+export const CLIP_FRAG = "#include <clipping_planes_fragment>";
+
+/**
+ * Clip these materials by their own planes. The renderer's planes clip what
+ * lies behind any of them; a material's can clip only what lies behind all,
+ * which is how a box is cut out. Null puts the material back under the renderer's.
+ * (A material's planes only count while the renderer's `localClippingEnabled` is on.)
+ */
+export function applyClip(
+  materials: Iterable<Material>,
+  planes: readonly Plane[] | null,
+  intersect: boolean,
+): void {
+  for (const m of materials) {
+    const local = intersect && planes && planes.length > 0 ? [...planes] : null;
+    if ((m.clippingPlanes === null) !== (local === null)) m.needsUpdate = true;
+    m.clippingPlanes = local;
+    m.clipIntersection = local !== null;
+  }
+}
+
+export interface PickMaterialOptions {
+  /** Declarations for the vertex shader: attributes, uniforms, varyings. */
+  vertexHead?: string;
+  /** Sets `vec4 mvPosition` and `gl_Position`; default: the geometry as it is. */
+  vertexMain?: string;
+  /** Declarations for the fragment shader (a varying declared in the vertex head is declared here too). */
+  fragmentHead?: string;
+  /** Runs first in main: where an element that is hidden is discarded. */
+  fragmentMain?: string;
+  /** A GLSL float expression for the id drawn; default `uId`, the uniform. */
+  idExpr?: string;
+  /** Uniforms beyond `uId`; a slot shared with a layer's own material stays shared. */
+  uniforms?: Record<string, IUniform>;
+  side?: Side;
+}
+
+/**
+ * The id-pass material every pickable layer builds from: opaque, unblended,
+ * clipped as the layer is, writing `PICK_ENCODE` of the id. Layers differ in
+ * how they place a vertex and what they discard, not in how an id is written.
+ */
+export function pickMaterial(o: PickMaterialOptions = {}): ShaderMaterial {
+  return new ShaderMaterial({
+    vertexShader: /* glsl */ `
+      ${CLIP_VERT_PARS}
+      ${o.vertexHead ?? ""}
+      void main() {
+        ${
+          o.vertexMain ??
+          "vec4 mvPosition = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mvPosition;"
+        }
+        ${CLIP_VERT}
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      precision highp float;
+      uniform float uId;
+      ${CLIP_FRAG_PARS}
+      ${PICK_ENCODE}
+      ${o.fragmentHead ?? ""}
+      void main() {
+        ${CLIP_FRAG}
+        ${o.fragmentMain ?? ""}
+        // rounded: a varying is only close to its integer
+        gl_FragColor = vec4(pickColour(floor((${o.idExpr ?? "uId"}) + 0.5)), 1.0);
+      }
+    `,
+    uniforms: { uId: { value: 0 }, ...o.uniforms },
+    side: o.side ?? FrontSide,
+    blending: NoBlending,
+    clipping: true,
+  });
+}
+
+/** A plane of this kit as three.js's own, which is what a clipping plane is there. */
+export const toClipPlane = (p: SectionPlane, into: Plane): Plane => {
+  into.normal.set(p.normal[0], p.normal[1], p.normal[2]);
+  into.constant = p.distance;
+  return into;
+};
 
 /**
  * For the id pass: everything in the scene that renders no ids hidden, since

@@ -5,9 +5,14 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./value": "./src/layers/value.ts",
+    "./colormap": "./src/colormap.ts",
+    "./direction": "./src/direction.ts",
+    "./host": "./src/host.ts",
+    "./legend": "./src/legend.ts",
+    "./measure": "./src/measure.ts",
     "./picking": "./src/picking.ts",
-    "./section": "./src/section.ts"
+    "./section": "./src/section.ts",
+    "./value": "./src/layers/value.ts"
   },
   "files": [
     "src",
@@ -15,7 +20,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "playground": "vite playground"
   },
   "dependencies": {
     "three": "^0.186.0"
@@ -24,6 +30,7 @@
     "@types/node": "^22.0.0",
     "@types/three": "^0.186.0",
     "typescript": "^5.9.0",
+    "vite": "^7.3.8",
     "vitest": "^3.2.0"
   }
 }

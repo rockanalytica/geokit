@@ -2,14 +2,8 @@
 // a Line's: clockwise from north, plunge below the horizontal, down
 // positive — and a plane's attitude as dip direction and dip. Z up, Y north.
 
-type Vec3 = [number, number, number];
-
-const rad = (deg: number) => (deg * Math.PI) / 180;
-const deg = (r: number) => (r * 180) / Math.PI;
-const unit = (a: Vec3): Vec3 => {
-  const n = Math.hypot(a[0], a[1], a[2]) || 1;
-  return [a[0] / n, a[1] / n, a[2] / n];
-};
+import type { Vec3 } from "./types";
+import { deg, rad, unit } from "./vec";
 
 /** The unit vector a Section is looked along. */
 export function sectionDirection(azimuth: number, plunge: number): Vec3 {
@@ -21,7 +15,8 @@ export function sectionDirection(azimuth: number, plunge: number): Vec3 {
 /** The azimuth and plunge of a direction; a vertical one is given azimuth 0. */
 export function directionAngles(d: Vec3): { azimuth: number; plunge: number } {
   const [x, y, z] = unit(d);
-  const plunge = deg(Math.asin(Math.max(-1, Math.min(1, -z))));
+  // + 0: a level direction plunges 0, not -0
+  const plunge = deg(Math.asin(Math.max(-1, Math.min(1, -z)))) + 0;
   const flat = Math.hypot(x, y) < 1e-9;
   const azimuth = flat ? 0 : (deg(Math.atan2(x, y)) + 360) % 360;
   return { azimuth, plunge };

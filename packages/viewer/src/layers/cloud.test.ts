@@ -85,6 +85,7 @@ describe("PointCloudLayer", () => {
     l.apply(view, cameraAt(100_000), 500);
     const shown = l.object.children.filter((c) => (c as Points).visible);
     expect(shown.length).toBe(1);
-    expect(l.resident).toBe(100);
+    // what was decoded (1 point), not what the source claimed (100)
+    expect(l.resident).toBe(1);
   });
 });

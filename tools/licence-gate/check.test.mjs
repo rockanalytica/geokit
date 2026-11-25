@@ -19,6 +19,24 @@ test("OR needs one permitted branch, AND needs all", () => {
   assert.equal(permitted("(MIT AND BSD-3-Clause)"), true);
 });
 
+test("AND binds tighter than OR, and parentheses group", () => {
+  assert.equal(permitted("MIT AND Zlib OR GPL-3.0"), true);
+  assert.equal(permitted("GPL-3.0 OR MIT AND Zlib"), true);
+  assert.equal(permitted("MIT AND (Zlib OR GPL-3.0)"), true);
+  assert.equal(permitted("(MIT OR GPL-3.0) AND MPL-2.0"), false);
+  assert.equal(permitted("MIT AND GPL-3.0 OR MPL-2.0"), false);
+  assert.equal(permitted("((MIT))"), true);
+});
+
+test("an exception is judged with its licence, and a malformed expression fails", () => {
+  assert.equal(permitted("Apache-2.0 WITH LLVM-exception"), false);
+  assert.equal(permitted("Apache-2.0 WITH LLVM-exception OR MIT"), true);
+  assert.equal(permitted("(MIT"), false);
+  assert.equal(permitted("MIT OR"), false);
+  assert.equal(permitted("MIT Apache-2.0"), false);
+  assert.equal(permitted(""), false);
+});
+
 test("guessed licences (asterisk) are judged on the identifier", () => {
   assert.equal(permitted("MIT*"), true);
   assert.equal(permitted("UNKNOWN"), false);

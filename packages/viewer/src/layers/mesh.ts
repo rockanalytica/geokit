@@ -20,10 +20,17 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
-  ShaderMaterial,
-  Vector3,
+  type Plane,
+  type ShaderMaterial,
 } from "three";
-import { NO_PICK_IDS, type Pickable, type PickIds, type PickTarget } from "../picking";
+import {
+  applyClip,
+  NO_PICK_IDS,
+  type Pickable,
+  type PickIds,
+  type PickTarget,
+  pickMaterial,
+} from "../picking";
 import { planeCrossing } from "../section";
 import type { SectionPlane } from "../types";
 
@@ -54,24 +61,6 @@ export interface MeshView {
    */
   vertexColours?: Float32Array | null;
 }
-
-const PICK_VERT = /* glsl */ `
-  #include <clipping_planes_pars_vertex>
-  void main() {
-    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-    gl_Position = projectionMatrix * mvPosition;
-    #include <clipping_planes_vertex>
-  }
-`;
-const PICK_FRAG = /* glsl */ `
-  precision highp float;
-  uniform vec3 uId;
-  #include <clipping_planes_pars_fragment>
-  void main() {
-    #include <clipping_planes_fragment>
-    gl_FragColor = vec4(uId, 1.0);
-  }
-`;
 
 /** Where a mesh lies: its surface's centre of mass and its box, in the scene's units. */
 export interface MeshPlace {
@@ -112,17 +101,9 @@ export class MeshLayer implements Pickable {
     };
     this.pickId = pickIds.take(1);
     const id = this.pickId;
-    this.pickMaterial = new ShaderMaterial({
-      vertexShader: PICK_VERT,
-      fragmentShader: PICK_FRAG,
-      uniforms: {
-        uId: {
-          value: new Vector3((id & 255) / 255, ((id >> 8) & 255) / 255, ((id >> 16) & 255) / 255),
-        },
-      },
-      side: DoubleSide,
-      clipping: true,
-    });
+    this.pickMaterial = pickMaterial({ side: DoubleSide });
+    const slot = this.pickMaterial.uniforms.uId;
+    if (slot) slot.value = id;
     this.drawn = this.materials.smooth;
     this.surface = new Mesh(geometry, this.drawn);
     this.crossing = new LineSegments(new BufferGeometry(), this.lineMaterial);
@@ -228,6 +209,18 @@ export class MeshLayer implements Pickable {
     this.crossing.geometry.dispose();
     this.crossing.geometry = new BufferGeometry();
     this.crossing.geometry.setAttribute("position", new Float32BufferAttribute(segments, 3));
+  }
+
+  /**
+   * Clip by these planes where the renderer's own cannot: with `intersect`, only
+   * what is behind all of them goes. Null puts the mesh back under the renderer's.
+   */
+  setClip(planes: readonly Plane[] | null, intersect: boolean) {
+    applyClip(
+      [...Object.values(this.materials), this.lineMaterial, this.pickMaterial],
+      planes,
+      intersect,
+    );
   }
 
   enterPick() {

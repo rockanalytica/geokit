@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { directionAngles, sectionDirection } from "./direction";
 import {
   atPosition,
-  directionAngles,
   niceStep,
   originAlong,
   planeCrossing,
   positionRange,
   readingSign,
   type SectionGeometry,
-  sectionDirection,
   sectionPlanes,
   sectionPosition,
   sectionRight,
