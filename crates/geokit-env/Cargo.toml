@@ -1,6 +1,6 @@
 [package]
 name = "geokit-env"
-version = "0.2.0"
+version = "0.3.0"
 description = "The Environment manager and the GPU Lease an app's desktop core shares: the Pythons it may start, the steps that install its own, and the one right to the GPU"
 authors = ["RockAnalytica"]
 license = "Apache-2.0"

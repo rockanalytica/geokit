@@ -28,6 +28,8 @@ interface Selftest {
   boxed: Record<string, number>;
   cutOut: Record<string, number>;
   resident: number;
+  marked: number;
+  cameras: number;
   glError: number;
 }
 
@@ -72,6 +74,9 @@ describe.skipIf(!browser)("the shaders in a browser", () => {
       // a clip box takes some of the blocks away, and cutting it out takes more
       expect(r.cutOut.element ?? 0).toBeLessThan(r.open.element ?? 0);
       expect(r.cutOut.mesh ?? 0).toBe(0);
+      // the lasso marked points, and the second look drew with no error
+      expect(r.marked).toBeGreaterThan(0);
+      expect(r.cameras).toBeGreaterThan(0);
     } finally {
       await server.close();
       rmSync(profile, { recursive: true, force: true });

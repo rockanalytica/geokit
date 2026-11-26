@@ -1,13 +1,15 @@
 {
   "name": "@geokit/viewer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./colormap": "./src/colormap.ts",
     "./direction": "./src/direction.ts",
+    "./frusta": "./src/layers/frusta.ts",
     "./host": "./src/host.ts",
+    "./lasso": "./src/lasso.ts",
     "./legend": "./src/legend.ts",
     "./measure": "./src/measure.ts",
     "./picking": "./src/picking.ts",

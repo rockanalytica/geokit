@@ -24,7 +24,8 @@ under Apache-2.0.
 Written here, not taken from an app: `crates/geokit-env/src/install.rs`,
 `detect.rs`, `problem.rs`, `process/os.rs`, `process/scripted.rs`;
 `packages/viewer/src/host.ts`, `legend.ts`, `measure.ts`, `vec.ts`,
-`layers/blocks.ts`, `playground/`, and their tests;
+`layers/blocks.ts`, `layers/frusta.ts`, `lasso.ts`, `playground/`, and their
+tests;
 `packages/ui/src/contrast.test.ts`. The changes to the files above, listed
 in [CHANGELOG.md](../CHANGELOG.md), were written here too.
 

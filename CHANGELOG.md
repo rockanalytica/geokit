@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0 (2026-11-26)
+
+### @geokit/viewer
+
+New:
+
+- `FrustumLayer` (`./frusta`): camera Frusta as one merged wireframe and
+  one dot set, a colour each, one highlighted, picked by index (`PickTarget`
+  kind `element`). `viewFrom(i)` and `poseOf` give the scene-camera pose
+  that sees as a Frustum did; `frustumLines` is its wireframe, pure.
+- `./lasso`: `insideLasso` (the points whose projection is inside a screen
+  loop, hidden or not), `insidePolygon`, `simplifyPath`, and `LassoPath`,
+  which draws the loop over everything.
+- `PointCloudLayer`:
+  - `CloudView.blend` mixes a point's own colour towards its class colour
+    when coloured by classification; `ownColourClass` keeps one class's own
+    colour; `blendColour` is the same mix in TypeScript.
+  - `CloudView.dim` draws classes at `DIMMED` brightness, in any colouring.
+  - `mark(key, indices)`, `clearMarks()` and `markedIn(key)`: points drawn
+    in `CloudView.markColour`, kept for nodes not loaded yet; `markFlags`
+    is the per-point flags, pure.
+  - `setClassification(key, values)` changes a loaded node's classes in
+    place.
+- The playground draws a ring of Frusta and a lasso (alt-drag), and its
+  `?selftest` checks both and the new cloud look.
+
+Breaking: none. A `CloudView` that sets none of the new fields draws as
+before.
+
 ## 0.2.0 (2026-11-25)
 
 ### geokit-env

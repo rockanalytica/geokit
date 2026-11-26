@@ -80,7 +80,12 @@ describe("applyClip", () => {
 
 describe("the layers", () => {
   it("write no clipping chunk, id encoding or pick shader of their own", () => {
-    for (const file of ["layers/cloud.ts", "layers/mesh.ts", "layers/blocks.ts"]) {
+    for (const file of [
+      "layers/cloud.ts",
+      "layers/mesh.ts",
+      "layers/blocks.ts",
+      "layers/frusta.ts",
+    ]) {
       const src = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
       expect(src, file).not.toContain("#include <clipping_planes");
       expect(src, file).not.toContain("pickColour");

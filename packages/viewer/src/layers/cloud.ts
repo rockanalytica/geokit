@@ -27,6 +27,7 @@ import {
   Box3,
   BufferAttribute,
   BufferGeometry,
+  DataTexture,
   Float32BufferAttribute,
   Frustum,
   Group,
@@ -35,7 +36,9 @@ import {
   type PerspectiveCamera,
   type Plane,
   Points,
+  RGBAFormat,
   ShaderMaterial,
+  UnsignedByteType,
   Vector3,
 } from "three";
 import {
@@ -103,7 +106,22 @@ export interface CloudView {
   size: number;
   /** Most points drawn at once. */
   budget: number;
+  /**
+   * Coloured by classification: how far from the point's own colour towards
+   * its class colour, 0–1. Absent: 1, the class colour alone.
+   */
+  blend?: number;
+  /** Coloured by classification: a class that keeps the point's own colour, unblended. */
+  ownColourClass?: number;
+  /** Classes drawn dimmed (a fifth of their brightness), by LAS class number, in any colouring. */
+  dim?: boolean[];
+  /** What marked points are drawn in, [r, g, b] 0–255; absent: orange. See `mark`. */
+  markColour?: [number, number, number];
 }
+
+/** How bright a dimmed class is drawn. */
+export const DIMMED = 0.15;
+const MARK: [number, number, number] = [255, 140, 0];
 
 const MODE: Record<CloudColour, number> = {
   rgb: 0,
@@ -132,10 +150,15 @@ const POINT_PLACE = /* glsl */ `
 const VERT = /* glsl */ `
   ${POINT_ATTRIBUTES}
   attribute vec3 colour;
+  attribute float mark;
   varying vec3 vColour;
+  varying float vClass;
+  varying float vMark;
   ${CLIP_VERT_PARS}
   void main() {
     vColour = colour;
+    vClass = classification;
+    vMark = mark;
     ${POINT_PLACE}
     ${CLIP_VERT}
   }
@@ -145,14 +168,30 @@ const FRAG = /* glsl */ `
   precision highp float;
   ${VALUE_HEAD}
   uniform int uMode;
+  uniform float uBlend;
+  uniform float uOwnClass;
+  uniform sampler2D uDim;
+  uniform float uDimSize;
+  uniform vec3 uMarkColour;
   varying float vValue;
   varying vec3 vColour;
+  varying float vClass;
+  varying float vMark;
   ${CLIP_FRAG_PARS}
   void main() {
     ${CLIP_FRAG}
     if (length(gl_PointCoord - 0.5) > 0.5) discard;
     if (uMode != 0 && valueHidden(vValue)) discard;
-    vec3 rgb = uMode == 0 ? vColour : valueColour(vValue).rgb;
+    vec3 rgb;
+    if (uMode == 0) rgb = vColour;
+    else if (uMode == 2) {
+      float b = abs(vClass - uOwnClass) < 0.5 ? 0.0 : uBlend;
+      rgb = mix(vColour, valueColour(vValue).rgb, b);
+    } else rgb = valueColour(vValue).rgb;
+    float c = floor(vClass + 0.5);
+    if (c >= 0.0 && c < uDimSize && texture2D(uDim, vec2((c + 0.5) / uDimSize, 0.5)).r > 0.5)
+      rgb *= ${DIMMED.toFixed(2)};
+    if (vMark > 0.5) rgb = uMarkColour;
     gl_FragColor = vec4(rgb, 1.0);
   }
 `;
@@ -339,12 +378,22 @@ export class PointCloudLayer {
     uZ0: { value: number };
     uSize: { value: number };
   };
+  private readonly look: {
+    uBlend: { value: number };
+    uOwnClass: { value: number };
+    uDim: { value: DataTexture };
+    uDimSize: { value: number };
+    uMarkColour: { value: [number, number, number] };
+  };
+  /** Marked points by node key, as `mark` was told; applied as a node lands. */
+  private readonly marks = new Map<string, ArrayLike<number>>();
   private readonly material: ShaderMaterial;
   private readonly idMaterial: ShaderMaterial;
   private readonly detailMaterial: ShaderMaterial;
   private readonly root: Node | null;
   private readonly byKey = new Map<string, Node>();
   private readonly byPickId = new Map<number, Node>();
+  private dimmed: boolean[] = [];
   private loadingCount = 0;
   private loadedPoints = 0;
   private choice = 0;
@@ -373,10 +422,17 @@ export class PointCloudLayer {
       uZ0: { value: source.zOrigin },
       uSize: { value: 2 },
     };
+    this.look = {
+      uBlend: { value: 1 },
+      uOwnClass: { value: NO_OWN_CLASS },
+      uDim: { value: dimTexture([]) },
+      uDimSize: { value: 0 },
+      uMarkColour: { value: [MARK[0] / 255, MARK[1] / 255, MARK[2] / 255] },
+    };
     this.material = new ShaderMaterial({
       vertexShader: VERT,
       fragmentShader: FRAG,
-      uniforms: this.uniforms,
+      uniforms: { ...this.uniforms, ...this.look },
       clipping: true,
     });
     const idPass = (idExpr: string) =>
@@ -474,6 +530,17 @@ export class PointCloudLayer {
     );
     this.uniforms.uMode.value = MODE[view.colourBy];
     this.uniforms.uSize.value = Math.max(1, view.size);
+    this.look.uBlend.value = Math.min(1, Math.max(0, view.blend ?? 1));
+    this.look.uOwnClass.value = view.ownColourClass ?? NO_OWN_CLASS;
+    const dim = view.dim ?? [];
+    if (!sameFlags(dim, this.dimmed)) {
+      this.dimmed = [...dim];
+      this.look.uDim.value.dispose();
+      this.look.uDim.value = dimTexture(dim);
+      this.look.uDimSize.value = dim.some(Boolean) ? dim.length : 0;
+    }
+    const [mr, mg, mb] = view.markColour ?? MARK;
+    this.look.uMarkColour.value = [mr / 255, mg / 255, mb / 255];
     this.budget = view.budget;
     const clip = this.clip;
     const skip = clip
@@ -500,6 +567,49 @@ export class PointCloudLayer {
       this.load(n);
     }
     this.evict(view.budget);
+  }
+
+  /**
+   * Mark points of a node, by their index in it, to be drawn in the view's
+   * mark colour (a selection, a preview of what an edit would take); null
+   * unmarks the node. Kept for a node not loaded yet, and applied when it lands.
+   */
+  mark(key: string, indices: ArrayLike<number> | null) {
+    if (indices && indices.length > 0) this.marks.set(key, indices);
+    else this.marks.delete(key);
+    const n = this.byKey.get(key);
+    if (n?.points) {
+      const a = n.points.geometry.getAttribute("mark") as BufferAttribute;
+      (a.array as Uint8Array).set(markFlags(n.count, this.marks.get(key)));
+      a.needsUpdate = true;
+    }
+    this.onChange();
+  }
+
+  /** Unmark every node. */
+  clearMarks() {
+    for (const key of [...this.marks.keys()]) this.mark(key, null);
+  }
+
+  /** The mark flags a loaded node draws with (1 marked), or null if it is not loaded. */
+  markedIn(key: string): Uint8Array | null {
+    const a = this.byKey.get(key)?.points?.geometry.getAttribute("mark");
+    return a ? (a.array as Uint8Array) : null;
+  }
+
+  /**
+   * Replace the classification of a loaded node in place, as when the app's
+   * classes change; it is also kept for the node's later loads only if the
+   * source's `load` hands it back. False if the node is not loaded or the length is wrong.
+   */
+  setClassification(key: string, classification: Float32Array): boolean {
+    const n = this.byKey.get(key);
+    if (!n?.points || classification.length !== n.count) return false;
+    const a = n.points.geometry.getAttribute("classification") as BufferAttribute;
+    (a.array as Float32Array).set(classification);
+    a.needsUpdate = true;
+    this.onChange();
+    return true;
   }
 
   /** A Viewport that will not apply again: what only it was drawing may be dropped. */
@@ -547,6 +657,7 @@ export class PointCloudLayer {
         g.setAttribute("classification", new Float32BufferAttribute(pts.classification, 1));
         const colour = pts.colour ?? new Uint8Array(pts.count * 3).fill(200);
         g.setAttribute("colour", new BufferAttribute(colour, 3, true));
+        g.setAttribute("mark", new BufferAttribute(markFlags(pts.count, this.marks.get(n.key)), 1));
         const points = new Points(g, this.material);
         points.frustumCulled = false;
         points.visible = false;
@@ -657,5 +768,53 @@ export class PointCloudLayer {
     this.idMaterial.dispose();
     this.detailMaterial.dispose();
     this.luts.dispose();
+    this.look.uDim.value.dispose();
+    this.marks.clear();
   }
+}
+
+/** `uOwnClass` when no class keeps its own colour: far from any class number. */
+const NO_OWN_CLASS = -1e9;
+
+/** One texel per class, red 255 where the class is dimmed. */
+function dimTexture(dim: readonly boolean[]): DataTexture {
+  const size = Math.max(1, dim.length);
+  const data = new Uint8Array(size * 4);
+  for (let i = 0; i < dim.length; i++) data[i * 4] = dim[i] ? 255 : 0;
+  const tex = new DataTexture(data, size, 1, RGBAFormat, UnsignedByteType);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function sameFlags(a: readonly boolean[], b: readonly boolean[]): boolean {
+  return a.length === b.length && a.every((x, i) => Boolean(x) === Boolean(b[i]));
+}
+
+/** One byte per point, 1 where `indices` names it; indices out of range are passed over. */
+export function markFlags(count: number, indices: ArrayLike<number> | undefined): Uint8Array {
+  const out = new Uint8Array(count);
+  if (indices)
+    for (let i = 0; i < indices.length; i++) {
+      const k = indices[i] ?? -1;
+      if (k >= 0 && k < count) out[k] = 1;
+    }
+  return out;
+}
+
+/**
+ * The colour a point is drawn in when coloured by classification, rgb 0–1,
+ * before dimming and marking: the GPU's blend, for tests and for an app that
+ * colours a mesh the same way. `classColour` is the class's colour, rgb 0–1.
+ */
+export function blendColour(
+  own: [number, number, number],
+  classColour: [number, number, number],
+  blend: number,
+): [number, number, number] {
+  const b = Math.min(1, Math.max(0, blend));
+  return [
+    own[0] + (classColour[0] - own[0]) * b,
+    own[1] + (classColour[1] - own[1]) * b,
+    own[2] + (classColour[2] - own[2]) * b,
+  ];
 }

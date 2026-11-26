@@ -117,6 +117,25 @@ Mesh, a Block, a single point of a Point Cloud. A pick is drawn in an id
 pass, never by casting rays.
 _Avoid_: select (a Selection is what an app keeps of picks), hit test, raycast
 
+**Lasso**:
+A freehand loop drawn on the screen, and the points whose projection falls
+inside it, hidden or not, never those behind the camera. It reaches through
+what is in front, as a pick does not.
+_Avoid_: select (as for Pick), brush
+
+**Mark**:
+Drawing chosen points of a Point Cloud in one colour over their own: what
+a Lasso took, or what an edit would take. Marks are the app's to set and
+clear; the layer only draws them.
+_Avoid_: highlight (that is one Frustum shown apart), selection
+
+**Frustum**:
+Where a camera stood and what it saw, drawn as a wireframe pyramid from the
+camera to a base `size` ahead, with a dot at the camera. Camera axes are x
+right, y down, z forward. One Frustum may be **highlighted**; a pick names
+a Frustum by its index.
+_Avoid_: camera gizmo, pose (that is where a scene camera goes to see as a Frustum did)
+
 **Point Cloud**:
 A large set of points read node by node from a COPC-style octree, under a
 **point budget**: only the nodes a Viewport needs are **resident**. A node

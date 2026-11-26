@@ -22,13 +22,13 @@ app's bundler compiles them.
 
 ```jsonc
 // package.json
-"@geokit/ui": "github:rockanalytica/geokit#v0.2.0&path:packages/ui",
-"@geokit/viewer": "github:rockanalytica/geokit#v0.2.0&path:packages/viewer"
+"@geokit/ui": "github:rockanalytica/geokit#v0.3.0&path:packages/ui",
+"@geokit/viewer": "github:rockanalytica/geokit#v0.3.0&path:packages/viewer"
 ```
 
 ```toml
 # Cargo.toml
-geokit-env = { git = "https://github.com/rockanalytica/geokit", tag = "v0.2.0" }
+geokit-env = { git = "https://github.com/rockanalytica/geokit", tag = "v0.3.0" }
 ```
 
 ### Brand slots
