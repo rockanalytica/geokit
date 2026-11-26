@@ -1,7 +1,7 @@
 // The playground: the one place the shaders actually run. A synthetic Point
-// Cloud, a Mesh and a field of Blocks, drawn through a LayerHost, under a
-// Section or a clip box, picked with the mouse, with a legend and a
-// measuring line. `?selftest` runs the checks a headless browser can read
+// Cloud, a Mesh, a field of Blocks and a ring of camera Frusta, drawn through
+// a LayerHost, under a Section or a clip box, picked with the mouse, with a
+// legend, a measuring line and a lasso (alt-drag) that marks points. `?selftest` runs the checks a headless browser can read
 // back (see `selftest`), and writes them into #result.
 
 import {
@@ -25,6 +25,10 @@ import {
   CYCLE,
   clipBox,
   EMBER,
+  type Frustum,
+  FrustumLayer,
+  insideLasso,
+  LassoPath,
   LayerHost,
   legendModel,
   MeasureLine,
@@ -34,7 +38,9 @@ import {
   PointCloudLayer,
   type SectionSpec,
   sectionSpec,
+  simplifyPath,
   type ValueView,
+  type Vec2,
   type Vec3,
   VIRIDIS,
 } from "../src/index";
@@ -74,6 +80,11 @@ function cloudSource(): CloudSource {
     nodes.push({ key: `1-${x}-${y}-${z}`, depth: 1, x, y, z, pointCount: 6000 });
   }
   const load = async (key: string): Promise<CloudNodePoints> => {
+    const pts = await make(key);
+    if (key === "0-0-0-0") rootPositions = pts.positions;
+    return pts;
+  };
+  const make = async (key: string): Promise<CloudNodePoints> => {
     await new Promise((r) => setTimeout(r, 30));
     const [depth, ix, iy, iz] = key.split("-").map(Number) as [number, number, number, number];
     const n = depth === 0 ? 3000 : 6000;
@@ -173,14 +184,59 @@ const blockLayer = host.add(
 const line = new MeasureLine();
 scene.add(line.object);
 
+/** Twelve cameras on a ring 60 m up, each looking at the middle. */
+function ring(): Frustum[] {
+  const out: Frustum[] = [];
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * 2 * Math.PI;
+    const p: Vec3 = [80 * Math.cos(a), 80 * Math.sin(a), 60];
+    // z forward towards the middle, x right along the ring, y down = z × x
+    const len = Math.hypot(p[0], p[1], p[2]);
+    const z: Vec3 = [-p[0] / len, -p[1] / len, -p[2] / len];
+    const x: Vec3 = [-Math.sin(a), Math.cos(a), 0];
+    const y: Vec3 = [
+      z[1] * x[2] - z[2] * x[1],
+      z[2] * x[0] - z[0] * x[2],
+      z[0] * x[1] - z[1] * x[0],
+    ];
+    out.push({
+      position: p,
+      rotation: [x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]],
+      fovY: 0.8,
+      aspect: 1.5,
+    });
+  }
+  return out;
+}
+const frustumView = (highlight: number | null) => ({
+  size: 8,
+  colours: [255, 204, 0] as [number, number, number],
+  highlight,
+});
+const frusta = host.add(new FrustumLayer(ring(), frustumView(null), host.ids));
+
+const lasso = new LassoPath();
+scene.add(lasso.object);
+/** The root node's positions, kept to lasso them. */
+let rootPositions: Float32Array | null = null;
+
 // ---- Controls ---------------------------------------------------------------
 
 let needsDraw = true;
 let colormap: Colormap = EMBER;
 const picked: Vec3[] = [];
 
+/** The selftest's second look: by class, blended half way, class 5 dimmed. */
+let byClass = false;
 const cloudView = () => ({
-  colourBy: "elevation" as const,
+  ...(byClass
+    ? {
+        colourBy: "classification" as const,
+        blend: 0.5,
+        ownColourClass: 1,
+        dim: [false, false, false, false, false, true],
+      }
+    : { colourBy: "elevation" as const }),
   colourRange: [-8, 8] as [number, number],
   filterRange: [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY] as [number, number],
   classMask: [],
@@ -231,6 +287,7 @@ function describe(hit: PickHit | null): string {
   const t = hit.target;
   if (t.kind === "point")
     return `point ${t.index} of node ${t.node} at ${t.position.map((c) => c.toFixed(1)).join(", ")}`;
+  if (t.kind === "element" && hit.layer === frusta) return `camera ${t.index}`;
   if (t.kind === "element")
     return `block ${t.index} at ${(blockLayer.block(t.index)?.centre ?? []).join(", ")}`;
   return t.kind;
@@ -244,9 +301,14 @@ function where(hit: PickHit | null): Vec3 | null {
 }
 
 renderer.domElement.addEventListener("click", (e) => {
+  if (e.altKey) return;
   const rect = renderer.domElement.getBoundingClientRect();
   const hit = host.pickAt(e.clientX - rect.left, e.clientY - rect.top, camera);
   $("status").textContent = `picked ${describe(hit)}`;
+  frusta.apply(
+    frustumView(hit?.layer === frusta && hit.target.kind === "element" ? hit.target.index : null),
+  );
+  needsDraw = true;
   const p = where(hit);
   if (p && e.shiftKey) {
     picked.push(p);
@@ -255,6 +317,43 @@ renderer.domElement.addEventListener("click", (e) => {
     $("status").textContent += `\nline ${m.total.toFixed(1)} m in ${m.legs.length} legs`;
     needsDraw = true;
   }
+});
+
+/** Mark the root node's points inside a loop of screen points. */
+function lassoMark(loop: Vec2[]) {
+  if (!rootPositions) return 0;
+  camera.updateMatrixWorld();
+  const vp = camera.projectionMatrix.clone().multiply(camera.matrixWorldInverse).elements;
+  const inside = insideLasso(
+    rootPositions,
+    vp,
+    simplifyPath(loop),
+    view.clientWidth,
+    view.clientHeight,
+  );
+  cloud.mark("0-0-0-0", inside);
+  needsDraw = true;
+  return inside.length;
+}
+
+let drawing: Vec2[] | null = null;
+renderer.domElement.addEventListener("pointerdown", (e) => {
+  if (!e.altKey || e.button !== 0) return;
+  controls.enabled = false;
+  drawing = [[e.offsetX, e.offsetY]];
+});
+renderer.domElement.addEventListener("pointermove", (e) => {
+  if (!drawing) return;
+  drawing.push([e.offsetX, e.offsetY]);
+  lasso.set(drawing, view.clientWidth, view.clientHeight);
+  needsDraw = true;
+});
+renderer.domElement.addEventListener("pointerup", () => {
+  if (!drawing) return;
+  $("status").textContent = `lasso marked ${lassoMark(drawing)} points`;
+  drawing = null;
+  controls.enabled = true;
+  lasso.set([], 1, 1);
 });
 
 function resize() {
@@ -318,6 +417,22 @@ async function selftest() {
   const cutOut = sweep();
   $<HTMLSelectElement>("keep").value = "none";
   refresh();
+  // the second look, a lasso round the middle and a highlighted camera, drawn once
+  byClass = true;
+  const w = view.clientWidth;
+  const h = view.clientHeight;
+  const loop: Vec2[] = [
+    [w * 0.3, h * 0.3],
+    [w * 0.7, h * 0.3],
+    [w * 0.7, h * 0.7],
+    [w * 0.3, h * 0.7],
+  ];
+  lasso.set(loop, w, h);
+  const marked = lassoMark(loop);
+  frusta.apply(frustumView(3));
+  needsDraw = true;
+  await new Promise((r) => setTimeout(r, 300));
+  const cameras = sweep().element ?? 0;
   const gl = renderer.getContext();
   const programs = renderer.info.programs?.length ?? 0;
   $("result").textContent = JSON.stringify({
@@ -328,6 +443,8 @@ async function selftest() {
     boxed,
     cutOut,
     resident: cloud.resident,
+    marked,
+    cameras,
     glError: gl.getError(),
   });
   document.body.dataset.done = "1";

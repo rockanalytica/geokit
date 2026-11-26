@@ -1,11 +1,11 @@
-// three.js layers the apps share: a point cloud, a mesh, blocks, the value
-// shader they colour through, GPU picking, section planes, a layer host that
-// ties them together, a legend and a measurement. Framework-free, and named
+// three.js layers the apps share: a point cloud, a mesh, blocks, camera
+// frusta, the value shader they colour through, GPU picking, section planes,
+// a layer host that ties them together, a legend, a measurement and a lasso. Framework-free, and named
 // for no app's domain. The Viewer that draws them is each app's own.
 //
 // This file is the whole public surface (`index.test.ts` pins it). The
 // package's subpaths — `./value`, `./picking`, `./section`, `./direction`,
-// `./host`, `./legend`, `./measure`, `./colormap` — are views of the same
+// `./host`, `./legend`, `./measure`, `./colormap`, `./frusta`, `./lasso` — are views of the same
 // names, never more.
 
 export const PACKAGE = "@geokit/viewer" as const;
@@ -32,8 +32,16 @@ export {
   type PickHit,
   type PickRead,
 } from "./host";
+export {
+  insideLasso,
+  insidePolygon,
+  LassoPath,
+  simplifyPath,
+  type Vec2,
+} from "./lasso";
 export { BlockLayer, type BlockSource } from "./layers/blocks";
 export {
+  blendColour,
   type ChoosableNode,
   type CloudColour,
   type CloudNodePoints,
@@ -41,8 +49,19 @@ export {
   type CloudSource,
   type CloudView,
   chooseNodes,
+  DIMMED,
+  markFlags,
   PointCloudLayer,
 } from "./layers/cloud";
+export {
+  FRUSTUM_LINE_VERTICES,
+  type Frustum,
+  FrustumLayer,
+  type FrustumPose,
+  type FrustumView,
+  frustumLines,
+  poseOf,
+} from "./layers/frusta";
 export {
   MeshLayer,
   type MeshMode,
